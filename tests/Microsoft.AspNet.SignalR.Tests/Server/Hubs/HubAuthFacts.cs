@@ -1,4 +1,8 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Reflection;
 using System.Security.Principal;
 using System.Threading;
 using Microsoft.AspNet.SignalR.Client.Hubs;
@@ -354,26 +358,51 @@ namespace Microsoft.AspNet.SignalR.Tests
         [Fact]
         public void AuthenticatedUserCanReceiveHubMessagesFromHubsInheritingFromAuthorizedHubs()
         {
-            using (var host = new MemoryHost())
+            var listener = new BufferedTraceListener();
+            Debug.Listeners.Add(listener);
+            Debug.AutoFlush = true;
+
+            bool running = true;
+            while (running)
             {
-                host.MapHubs();
-                var connection = new Client.Hubs.HubConnection("http://foo/");
+                listener.Lines.Clear();
 
-                host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
-
-                var hub = connection.CreateHubProxy("InheritAuthHub");
-                var wh = new ManualResetEvent(false);
-                hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                try
                 {
-                    Assert.NotNull(id);
-                    wh.Set();
-                });
+                    Debug.WriteLine("======================================");
+                    using (var host = new MemoryHost())
+                    {
+                        host.MapHubs();
+                        var connection = new Client.Hubs.HubConnection("http://foo/");
+                        var bus = (MessageBus)host.DependencyResolver.Resolve<IMessageBus>();
 
-                connection.Start(host).Wait();
+                        host.User = new GenericPrincipal(new GenericIdentity("test"), new string[] { });
 
-                Assert.True(wh.WaitOne(TimeSpan.FromSeconds(3)));
-                connection.Stop();
+                        var hub = connection.CreateHubProxy("InheritAuthHub");
+                        var wh = new ManualResetEvent(false);
+                        hub.On<string, string, object>("joined", (id, time, authInfo) =>
+                        {
+                            Assert.NotNull(id);
+                            wh.Set();
+                        });
+
+                        connection.Start(host).Wait();
+
+                        if (!wh.WaitOne(TimeSpan.FromSeconds(10)))
+                        {
+                            running = false;
+                        }
+
+                        connection.Stop();
+                    }
+                }
+                finally
+                {
+                    Debug.WriteLine("======================================");
+                }
             }
+
+            File.WriteAllLines(@"C:\Users\davidfowler\Desktop\" + MethodInfo.GetCurrentMethod().Name + ".trace.txt", listener.Lines);
         }
 
         [Fact]
@@ -976,6 +1005,21 @@ namespace Microsoft.AspNet.SignalR.Tests
         {
             GC.Collect();
             GC.WaitForPendingFinalizers();
+        }
+
+        private class BufferedTraceListener : TraceListener
+        {
+            public List<string> Lines = new List<string>();
+
+            public override void WriteLine(string message)
+            {
+                Lines.Add(message);
+            }
+
+            public override void Write(string message)
+            {
+                Lines.Add(message);
+            }
         }
     }
 }

@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Infrastructure;
@@ -59,6 +60,11 @@ namespace Microsoft.AspNet.SignalR
                         UpdateCursor(c.Key, 0);
                     }
                 }
+            }
+
+            if (_cursors.Count > 1)
+            {
+                Debug.WriteLine("Subscribe(" + Cursor.MakeCursor(_cursors) + ")");
             }
 
             // Add dummy entries so they can be filled in

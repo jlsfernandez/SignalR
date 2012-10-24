@@ -1,7 +1,9 @@
 ﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
 
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using IClientResponse = Microsoft.AspNet.SignalR.Client.Http.IResponse;
@@ -263,6 +265,8 @@ namespace Microsoft.AspNet.SignalR.Hosting.Memory
 
             public override void Write(byte[] buffer, int offset, int count)
             {
+                Debug.WriteLine("WRITE(" + Encoding.UTF8.GetString(buffer, offset, count) + ")");
+
                 _currentStream.Write(buffer, offset, count);
 
                 if (_onWrite != null)

@@ -182,6 +182,8 @@ namespace Microsoft.AspNet.SignalR
 
         private void ProcessResults(MessageResult result)
         {
+            result.Messages.Enumerate(m => !m.IsCommand, m => Debug.WriteLine(m.Value));
+
             result.Messages.Enumerate(message => message.IsAck || message.IsCommand,
                                       message =>
                                       {
