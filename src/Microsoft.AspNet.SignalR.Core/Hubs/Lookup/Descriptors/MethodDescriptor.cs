@@ -1,7 +1,9 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
@@ -23,7 +25,10 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <summary>
         /// Available method parameters.
         /// </summary>
+        [SuppressMessage("Microsoft.Usage", "CA2227:CollectionPropertiesShouldBeReadOnly", Justification = "This is supposed to be mutable")]
         public virtual IList<ParameterDescriptor> Parameters { get; set; }
+
+        public Type ProgressReportingType { get; set; }
 
         /// <summary>
         /// Method invocation delegate.

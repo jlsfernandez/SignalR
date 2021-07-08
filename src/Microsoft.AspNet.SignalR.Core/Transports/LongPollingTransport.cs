@@ -1,72 +1,54 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
-using System.Collections.Generic;
-using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Configuration;
+using Microsoft.AspNet.SignalR.Hosting;
 using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Json;
+using Microsoft.AspNet.SignalR.Tracing;
+using Newtonsoft.Json;
 
 namespace Microsoft.AspNet.SignalR.Transports
 {
-    public class LongPollingTransport : TransportDisconnectBase, ITransport
+    public class LongPollingTransport : ForeverTransport, ITransport
     {
-        private readonly IJsonSerializer _jsonSerializer;
+        private readonly IConfigurationManager _configurationManager;
         private readonly IPerformanceCounterManager _counters;
+        private bool _responseSent;
 
-        // This should be ok to do since long polling request never hang around too long
-        // so we won't bloat memory
-        private const int MaxMessages = 5000;
+        private static readonly ArraySegment<byte> _keepAlive = new ArraySegment<byte>(new byte[] { 32 });
 
         public LongPollingTransport(HostContext context, IDependencyResolver resolver)
             : this(context,
-                   resolver.Resolve<IJsonSerializer>(),
-                   resolver.Resolve<ITransportHeartBeat>(),
-                   resolver.Resolve<IPerformanceCounterManager>())
+                   resolver.Resolve<JsonSerializer>(),
+                   resolver.Resolve<ITransportHeartbeat>(),
+                   resolver.Resolve<IPerformanceCounterManager>(),
+                   resolver.Resolve<ITraceManager>(),
+                   resolver.Resolve<IConfigurationManager>(),
+                   resolver.Resolve<IMemoryPool>())
         {
 
         }
 
-        public LongPollingTransport(HostContext context, IJsonSerializer jsonSerializer, ITransportHeartBeat heartBeat, IPerformanceCounterManager performanceCounterManager)
-            : base(context, jsonSerializer, heartBeat, performanceCounterManager)
+        public LongPollingTransport(HostContext context,
+                                    JsonSerializer jsonSerializer,
+                                    ITransportHeartbeat heartbeat,
+                                    IPerformanceCounterManager performanceCounterManager,
+                                    ITraceManager traceManager,
+                                    IConfigurationManager configurationManager,
+                                    IMemoryPool pool)
+            : base(context, jsonSerializer, heartbeat, performanceCounterManager, traceManager, pool)
         {
-            _jsonSerializer = jsonSerializer;
+            _configurationManager = configurationManager;
             _counters = performanceCounterManager;
-        }
-
-        // Static events intended for use when measuring performance
-        public static event Action<string> Sending;
-        public static event Action<PersistentResponse> SendingResponse;
-        public static event Action<string> Receiving;
-
-        /// <summary>
-        /// The number of milliseconds to tell the browser to wait before restablishing a
-        /// long poll connection after data is sent from the server. Defaults to 0.
-        /// </summary>
-        public static long LongPollDelay
-        {
-            get;
-            set;
         }
 
         public override TimeSpan DisconnectThreshold
         {
-            get { return TimeSpan.FromMilliseconds(LongPollDelay); }
-        }
-
-        protected override bool IsConnectRequest
-        {
-            get
-            {
-                return Context.Request.Url.LocalPath.EndsWith("/connect", StringComparison.OrdinalIgnoreCase);
-            }
-        }
-
-        private bool IsReconnectRequest
-        {
-            get
-            {
-                return Context.Request.Url.LocalPath.EndsWith("/reconnect", StringComparison.OrdinalIgnoreCase);
-            }
+            get { return _configurationManager.LongPollDelay; }
         }
 
         private bool IsJsonp
@@ -74,22 +56,6 @@ namespace Microsoft.AspNet.SignalR.Transports
             get
             {
                 return !String.IsNullOrEmpty(JsonpCallback);
-            }
-        }
-
-        private bool IsSendRequest
-        {
-            get
-            {
-                return Context.Request.Url.LocalPath.EndsWith("/send", StringComparison.OrdinalIgnoreCase);
-            }
-        }
-
-        private string MessageId
-        {
-            get
-            {
-                return Context.Request.QueryString["messageId"];
             }
         }
 
@@ -105,173 +71,257 @@ namespace Microsoft.AspNet.SignalR.Transports
         {
             get
             {
-                return false;
+                return !IsJsonp;
             }
         }
 
-        public Func<string, Task> Received { get; set; }
-
-        public Func<Task> TransportConnected { get; set; }
-
-        public Func<Task> Connected { get; set; }
-
-        public Func<Task> Reconnected { get; set; }
-
-        public Task ProcessRequest(ITransportConnection connection)
+        public override bool RequiresTimeout
         {
-            Connection = connection;
-
-            if (IsSendRequest)
+            get
             {
-                return ProcessSendRequest();
+                return true;
             }
-            else if (IsAbortRequest)
-            {
-                return Connection.Abort(ConnectionId);
-            }
-            else
-            {
-                InitializePersistentState();
+        }
 
-                if (IsConnectRequest)
+        // This should be ok to do since long polling request never hang around too long
+        // so we won't bloat memory
+        protected override int MaxMessages
+        {
+            get
+            {
+                return 5000;
+            }
+        }
+
+        protected override bool SuppressReconnect
+        {
+            get
+            {
+                return !Context.Request.LocalPath.EndsWith("/reconnect", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        protected override Task InitializeMessageId()
+        {
+            _lastMessageId = Context.Request.QueryString["messageId"];
+
+            if (_lastMessageId == null)
+            {
+                return Context.Request.ReadForm().Then((form, t) =>
                 {
-                    return ProcessConnectRequest(connection);
-                }
-                else if (MessageId != null)
-                {
-                    if (IsReconnectRequest && Reconnected != null)
-                    {
-                        // Return a task that completes when the reconnected event task & the receive loop task are both finished
-                        Func<Task> reconnected = () => Reconnected().Then(() => _counters.ConnectionsReconnected.Increment());
-                        return TaskAsyncHelper.Interleave(ProcessReceiveRequest, reconnected, connection, Completed);
-                    }
-
-                    return ProcessReceiveRequest(connection);
-                }
-            }
-
-            return null;
-        }
-
-        public virtual Task Send(PersistentResponse response)
-        {
-            HeartBeat.MarkConnection(this);
-
-            if (SendingResponse != null)
-            {
-                SendingResponse(response);
-            }
-
-            AddTransportData(response);
-
-            return Send((object)response);
-        }
-
-        public virtual Task Send(object value)
-        {
-            Context.Response.ContentType = IsJsonp ? Json.JsonpMimeType : Json.MimeType;
-
-            if (IsJsonp)
-            {
-                OutputWriter.Write(JsonpCallback);
-                OutputWriter.Write("(");
-            }
-
-            _jsonSerializer.Serialize(value, OutputWriter);
-
-            if (IsJsonp)
-            {
-                OutputWriter.Write(");");
-            }
-
-            OutputWriter.Flush();
-            return Context.Response.EndAsync();
-        }
-
-        private Task ProcessSendRequest()
-        {
-            string data = Context.Request.Form["data"] ?? Context.Request.QueryString["data"];
-
-            if (Receiving != null)
-            {
-                Receiving(data);
-            }
-
-            if (Received != null)
-            {
-                return Received(data);
+                    t._lastMessageId = form["messageId"];
+                }, this);
             }
 
             return TaskAsyncHelper.Empty;
         }
 
-        private Task ProcessConnectRequest(ITransportConnection connection)
+        [SuppressMessage("Microsoft.Design", "CA1024:UsePropertiesWhereAppropriate", Justification = "This is for async.")]
+        public override Task<string> GetGroupsToken()
         {
-            if (Connected != null)
-            {
-                bool newConnection = HeartBeat.AddConnection(this);
+            var groupsToken = Context.Request.QueryString["groupsToken"];
 
-                // Return a task that completes when the connected event task & the receive loop task are both finished
-                return TaskAsyncHelper.Interleave(ProcessReceiveRequestWithoutTracking, () =>
+            if (groupsToken == null)
+            {
+                return Context.Request.ReadForm().Then(form =>
                 {
-                    if (newConnection)
-                    {
-                        return Connected().Then(() => _counters.ConnectionsConnected.Increment());
-                    }
-                    return TaskAsyncHelper.Empty;
-                },
-                connection, Completed);
+                    return form["groupsToken"];
+                });
             }
 
-            return ProcessReceiveRequest(connection);
+            return Task.FromResult(groupsToken);
         }
 
-        private Task ProcessReceiveRequest(ITransportConnection connection, Action postReceive = null)
+        public override Task KeepAlive()
         {
-            HeartBeat.AddConnection(this);
-            return ProcessReceiveRequestWithoutTracking(connection, postReceive);
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return EnqueueOperation(state => PerformKeepAlive(state), this);
         }
 
-        private Task ProcessReceiveRequestWithoutTracking(ITransportConnection connection, Action postReceive = null)
+        public override Task Send(PersistentResponse response)
         {
-            if (TransportConnected != null)
+            Heartbeat.MarkConnection(this);
+
+            AddTransportData(response);
+
+            // This overload is only used in response to /connect, /poll and /reconnect requests,
+            // so the response will have already been initialized by ProcessMessages.
+            var context = new LongPollingTransportContext(this, response);
+            return EnqueueOperation(state => PerformPartialSend(state), context);
+        }
+
+        public override Task Send(object value)
+        {
+            var context = new LongPollingTransportContext(this, value);
+
+            // This overload is only used in response to /send requests,
+            // so the response will be uninitialized.
+            return EnqueueOperation(state => PerformCompleteSend(state), context);
+        }
+
+        public override void IncrementConnectionsCount()
+        {
+            _counters.ConnectionsCurrentLongPolling.Increment();
+        }
+
+        public override void DecrementConnectionsCount()
+        {
+            _counters.ConnectionsCurrentLongPolling.Decrement();
+        }
+
+        protected override Task<bool> OnMessageReceived(PersistentResponse response)
+        {
+            if (response == null)
             {
-                TransportConnected().Catch();
+                throw new ArgumentNullException("response");
             }
 
-            // ReceiveAsync() will async wait until a message arrives then return
-            var receiveTask = IsConnectRequest ?
-                              connection.ReceiveAsync(null, ConnectionEndToken, MaxMessages) :
-                              connection.ReceiveAsync(MessageId, ConnectionEndToken, MaxMessages);
+            response.Reconnect = HostShutdownToken.IsCancellationRequested;
 
-            if (postReceive != null)
+            Task task = TaskAsyncHelper.Empty;
+
+            if (response.Aborted)
             {
-                postReceive();
+                // If this was a clean disconnect then raise the event
+                task = Abort();
             }
 
-            return receiveTask.Then(response =>
+            if (response.Terminal)
             {
-                response.TimedOut = IsTimedOut;
-
-                if (response.Aborted)
+                // If the response wasn't sent, send it before ending the request
+                if (!_responseSent)
                 {
-                    // If this was a clean disconnect then raise the event
-                    OnDisconnect();
+                    // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+                    return task.Then((transport, resp) => transport.Send(resp), this, response)
+                               .Then(() =>
+                               {
+                                   _transportLifetime.Complete();
+
+                                   return TaskAsyncHelper.False;
+                               });
                 }
 
-                return Send(response);
-            });
+                // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+                return task.Then(() =>
+                {
+                    _transportLifetime.Complete();
+
+                    return TaskAsyncHelper.False;
+                });
+            }
+
+            // Mark the response as sent
+            _responseSent = true;
+
+            // Send the response and return false
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return task.Then((transport, resp) => transport.Send(resp), this, response)
+                       .Then(() => TaskAsyncHelper.False);
+        }
+
+        protected internal override Task InitializeResponse(ITransportConnection connection)
+        {
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return base.InitializeResponse(connection)
+                       .Then(s => WriteInit(s), this);
+        }
+
+        protected override async Task ProcessSendRequest()
+        {
+            INameValueCollection form = await Context.Request.ReadForm().PreserveCulture();
+            string data = form["data"] ?? Context.Request.QueryString["data"];
+
+            if (Received != null)
+            {
+                await Received(data).PreserveCulture();
+            }
+        }
+
+        private static Task WriteInit(LongPollingTransport transport)
+        {
+            transport.Context.Response.ContentType = transport.IsJsonp ? JsonUtility.JavaScriptMimeType : JsonUtility.JsonMimeType;
+            return transport.Context.Response.Flush();
+        }
+
+        private static Task PerformKeepAlive(object state)
+        {
+            var transport = (LongPollingTransport)state;
+
+            if (!transport.IsAlive)
+            {
+                return TaskAsyncHelper.Empty;
+            }
+
+            transport.Context.Response.Write(_keepAlive);
+
+            return transport.Context.Response.Flush();
+        }
+
+        private static Task PerformPartialSend(object state)
+        {
+            var context = (LongPollingTransportContext)state;
+
+            if (!context.Transport.IsAlive)
+            {
+                return TaskAsyncHelper.Empty;
+            }
+
+            using (var writer = new BinaryMemoryPoolTextWriter(context.Transport.Pool))
+            {
+                if (context.Transport.IsJsonp)
+                {
+                    writer.Write(context.Transport.JsonpCallback);
+                    writer.Write("(");
+                }
+
+                context.Transport.JsonSerializer.Serialize(context.State, writer);
+
+                if (context.Transport.IsJsonp)
+                {
+                    writer.Write(");");
+                }
+
+                writer.Flush();
+
+                context.Transport.Context.Response.Write(writer.Buffer);
+            }
+
+            return context.Transport.Context.Response.Flush();
+        }
+
+        private static Task PerformCompleteSend(object state)
+        {
+            var context = (LongPollingTransportContext)state;
+
+            if (!context.Transport.IsAlive)
+            {
+                return TaskAsyncHelper.Empty;
+            }
+
+            context.Transport.Context.Response.ContentType = context.Transport.IsJsonp ?
+                JsonUtility.JavaScriptMimeType :
+                JsonUtility.JsonMimeType;
+
+            return PerformPartialSend(state);
         }
 
         private void AddTransportData(PersistentResponse response)
         {
-            if (LongPollDelay > 0)
+            if (_configurationManager.LongPollDelay != TimeSpan.Zero)
             {
-                if (response.TransportData == null)
-                {
-                    response.TransportData = new Dictionary<string, object>();
-                }
-                response.TransportData["LongPollDelay"] = LongPollDelay;
+                response.LongPollDelay = (long)_configurationManager.LongPollDelay.TotalMilliseconds;
+            }
+        }
+
+        private class LongPollingTransportContext
+        {
+            public object State;
+            public LongPollingTransport Transport;
+
+            public LongPollingTransportContext(LongPollingTransport transport, object state)
+            {
+                State = state;
+                Transport = transport;
             }
         }
     }

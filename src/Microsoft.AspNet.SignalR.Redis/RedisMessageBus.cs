@@ -1,127 +1,181 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
-using BookSleeve;
-using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Messaging;
+using Microsoft.AspNet.SignalR.Tracing;
 
 namespace Microsoft.AspNet.SignalR.Redis
 {
+    /// <summary>
+    /// Uses Redis pub-sub to scale-out SignalR applications in web farms.
+    /// </summary>
     public class RedisMessageBus : ScaleoutMessageBus
     {
+        private const int DefaultBufferSize = 1000;
+
         private readonly int _db;
-        private readonly string[] _keys;
-        private RedisConnection _connection;
-        private RedisSubscriberConnection _channel;
-        private Task _connectTask;
+        private readonly string _key;
+        private readonly TraceSource _trace;
+        private readonly ITraceManager _traceManager;
 
-        private readonly TaskQueue _publishQueue = new TaskQueue();
+        private IRedisConnection _connection;
+        private string _connectionString;
+        private readonly object _callbackLock = new object();
+        private ulong? lastId = null;
 
-        public RedisMessageBus(string server, int port, string password, int db, IEnumerable<string> keys, IDependencyResolver resolver)
-            : base(resolver)
+        public RedisMessageBus(IDependencyResolver resolver, RedisScaleoutConfiguration configuration, IRedisConnection connection)
+            : this(resolver, configuration, connection, true)
         {
-            _db = db;
-            _keys = keys.ToArray();
+        }
 
-            _connection = new RedisConnection(host: server, port: port, password: password);
-
-            _connection.Closed += OnConnectionClosed;
-            _connection.Error += OnConnectionError;
-
-            // Start the connection
-            _connectTask = _connection.Open().Then(() =>
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Performance", "CA1804:RemoveUnusedLocals", MessageId = "ignore")]
+        internal RedisMessageBus(IDependencyResolver resolver, RedisScaleoutConfiguration configuration, IRedisConnection connection, bool connectAutomatically)
+            : base(resolver, configuration)
+        {
+            if (configuration == null)
             {
-                // Create a subscription channel in redis
-                _channel = _connection.GetOpenSubscriberChannel();
+                throw new ArgumentNullException("configuration");
+            }
 
-                // Subscribe to the registered connections
-                _channel.Subscribe(_keys, OnMessage);
+            _connection = connection;
+            _connection.ConnectionFailed += OnConnectionFailed;
+            _connection.ConnectionRestored += OnConnectionRestored;
+            _connection.ErrorMessage += OnConnectionError;
 
-                // Dirty hack but it seems like subscribe returns before the actual
-                // subscription is properly setup in some cases
-                while (_channel.SubscriptionCount == 0)
+            _connectionString = configuration.ConnectionString;
+            _db = configuration.Database;
+            _key = configuration.EventKey;
+
+            _traceManager = resolver.Resolve<ITraceManager>();
+
+            _trace = _traceManager["SignalR." + nameof(RedisMessageBus)];
+
+            ReconnectDelay = TimeSpan.FromSeconds(2);
+
+            if (connectAutomatically)
+            {
+                ThreadPool.QueueUserWorkItem(_ =>
                 {
-                    Thread.Sleep(500);
-                }
-            });
-        }
-
-        protected override Task Send(Message[] messages)
-        {
-            return _connectTask.Then(msgs =>
-            {
-                var taskCompletionSource = new TaskCompletionSource<object>();
-
-                // Group messages by source (connection id)
-                var messagesBySource = msgs.GroupBy(m => m.Source);
-
-                SendImpl(messagesBySource.GetEnumerator(), taskCompletionSource);
-
-                return taskCompletionSource.Task;
-            },
-            messages);
-        }
-
-        private void SendImpl(IEnumerator<IGrouping<string, Message>> enumerator, TaskCompletionSource<object> taskCompletionSource)
-        {
-            if (!enumerator.MoveNext())
-            {
-                taskCompletionSource.TrySetResult(null);
-            }
-            else
-            {
-                IGrouping<string, Message> group = enumerator.Current;
-
-                // Get the channel index we're going to use for this message
-                int index = Math.Abs(group.Key.GetHashCode()) % _keys.Length;
-
-                string key = _keys[index];
-
-                // Increment the channel number
-                _connection.Strings.Increment(_db, key)
-                                   .Then((id, k) =>
-                                   {
-                                       var message = new RedisMessage(id, group.ToArray());
-
-                                       return _connection.Publish(k, message.GetBytes());
-                                   }, key)
-                                   .Then((enumer, tcs) => SendImpl(enumer, tcs), enumerator, taskCompletionSource)
-                                   .ContinueWithNotComplete(taskCompletionSource);
+                    var ignore = ConnectWithRetry();
+                });
             }
         }
 
-        private void OnConnectionClosed(object sender, EventArgs e)
+        public TimeSpan ReconnectDelay { get; set; }
+
+        public virtual void OpenStream(int streamIndex)
         {
-            // Should we auto reconnect?
+            Open(streamIndex);
         }
 
-        private void OnConnectionError(object sender, BookSleeve.ErrorEventArgs e)
+        protected override Task Send(int streamIndex, IList<Message> messages)
         {
-            // How do we bubble errors?
+            return _connection.ScriptEvaluateAsync(
+                _db,
+                @"local newId = redis.call('INCR', KEYS[1])
+                  local payload = newId .. ' ' .. ARGV[1]
+                  redis.call('PUBLISH', KEYS[1], payload)
+                  return {newId, ARGV[1], payload}",
+                _key,
+                RedisMessage.ToBytes(messages));
         }
 
-        private void OnMessage(string key, byte[] data)
+        protected override void Dispose(bool disposing)
         {
-            // The key is the stream id (channel)
-            var message = RedisMessage.Deserialize(data);
-
-            _publishQueue.Enqueue(() => OnReceived(key, (ulong)message.Id, message.Messages));
-        }
-
-        public override void Dispose()
-        {
-            if (_channel != null)
+            _trace.TraceInformation(nameof(RedisMessageBus) + " is being disposed");
+            if (disposing)
             {
-                _channel.Unsubscribe(_keys);
-                _channel.Close(abort: true);
+                Shutdown();
             }
+
+            base.Dispose(disposing);
+        }
+
+        private void Shutdown()
+        {
+            _trace.TraceInformation("Shutdown()");
 
             if (_connection != null)
             {
-                _connection.Close(abort: true);
+                _connection.Close(_key, allowCommandsToComplete: false);
+            }
+        }
+
+        private void OnConnectionFailed(Exception ex)
+        {
+            string errorMessage = (ex != null) ? ex.Message : Resources.Error_RedisConnectionClosed;
+
+            _trace.TraceInformation("OnConnectionFailed - " + errorMessage);
+        }
+
+        private void OnConnectionError(Exception ex)
+        {
+            OnError(0, ex);
+            _trace.TraceError("OnConnectionError - " + ex.Message);
+        }
+
+        private async void OnConnectionRestored(Exception ex)
+        {
+            await _connection.RestoreLatestValueForKey(_db, _key);
+
+            _trace.TraceInformation("Connection restored");
+
+            OpenStream(0);
+        }
+
+        internal async Task ConnectWithRetry()
+        {
+            while (true)
+            {
+                try
+                {
+                    await ConnectToRedisAsync();
+
+                    _trace.TraceInformation("Opening stream.");
+                    OpenStream(0);
+
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    _trace.TraceError("Error connecting to Redis - " + ex.GetBaseException());
+                }
+
+                await Task.Delay(ReconnectDelay);
+            }
+        }
+
+        private async Task ConnectToRedisAsync()
+        {
+            _trace.TraceInformation("Connecting...");
+
+            // We need to hold the dispose lock during this in order to ensure that ConnectAsync completes fully without Dispose getting in the way
+            await _connection.ConnectAsync(_connectionString, _traceManager["SignalR." + nameof(RedisConnection)]);
+
+            _trace.TraceInformation("Connection opened");
+
+            await _connection.SubscribeAsync(_key, OnMessage);
+
+            _trace.TraceVerbose("Subscribed to event " + _key);
+        }
+
+        private void OnMessage(int streamIndex, RedisMessage message)
+        {
+            // locked to avoid overlapping calls (even though we have set the mode
+            // to preserve order on the subscription)
+            lock (_callbackLock)
+            {
+                if (lastId.HasValue && message.Id < lastId.Value)
+                {
+                    _trace.TraceEvent(TraceEventType.Error, 0, $"ID regression occurred. The next message ID {message.Id} was less than the previous message {lastId.Value}");
+                }
+                lastId = message.Id;
+                OnReceived(streamIndex, message.Id, message.ScaleoutMessage);
             }
         }
     }

@@ -1,42 +1,46 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+
+#if NET40
 
 using System;
 using System.IO;
 using System.Net;
+using System.Threading.Tasks;
 
 namespace Microsoft.AspNet.SignalR.Client.Http
 {
     public class HttpWebResponseWrapper : IResponse
     {
-        private readonly IRequest _request;
         private readonly HttpWebResponse _response;
 
-        public HttpWebResponseWrapper(IRequest request, HttpWebResponse response)
+        public HttpWebResponseWrapper(HttpWebResponse response)
         {
-            _request = request;
             _response = response;
         }
 
-        public string ReadAsString()
-        {
-            return _response.ReadAsString();   
-        }
-
-        public Stream GetResponseStream()
+        public Stream GetStream()
         {
             return _response.GetResponseStream();
         }
 
-        public void Close()
+        protected virtual void Dispose(bool disposing)
         {
-            if (_request != null)
+            if (disposing)
             {
-                // Always try to abort the request since close hangs if the connection is 
-                // being held open
-                _request.Abort();
+                ((IDisposable)_response).Dispose();
             }
+        }
 
-            ((IDisposable)_response).Dispose();
+        public void Dispose()
+        {
+            Dispose(true);
         }
     }
 }
+
+#elif NETSTANDARD1_3 || NET45 || NETSTANDARD2_0
+// Not supported on this framework.
+#else 
+#error Unsupported target framework.
+#endif

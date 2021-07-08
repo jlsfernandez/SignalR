@@ -1,4 +1,5 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
@@ -8,7 +9,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
 {
     public class DefaultAssemblyLocator : IAssemblyLocator
     {
-        public virtual IEnumerable<Assembly> GetAssemblies()
+        public virtual IList<Assembly> GetAssemblies()
         {
             return AppDomain.CurrentDomain.GetAssemblies();
         }

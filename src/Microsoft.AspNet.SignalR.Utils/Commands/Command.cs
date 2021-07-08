@@ -1,4 +1,7 @@
-﻿using System;
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+
+using System;
 
 namespace Microsoft.AspNet.SignalR.Utils
 {
@@ -18,7 +21,7 @@ namespace Microsoft.AspNet.SignalR.Utils
 
         public abstract string[] Names { get; }
 
-        public abstract void Execute(string[] args);
+        public abstract int Execute(string[] args);
 
         protected Action<string> Info { get; private set; }
 
@@ -26,6 +29,7 @@ namespace Microsoft.AspNet.SignalR.Utils
 
         protected Action<string> Warning { get; private set; }
 
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Performance", "CA1811:AvoidUncalledPrivateCode", Justification = "May be used in future derivations.")]
         protected Action<string> Error { get; private set; }
     }
 }

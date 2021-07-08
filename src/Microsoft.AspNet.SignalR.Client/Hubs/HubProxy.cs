@@ -1,28 +1,24 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
-#if !WINDOWS_PHONE && !NET35
-using System.Dynamic;
-#endif
+using System.Diagnostics.CodeAnalysis;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Infrastructure;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Microsoft.AspNet.SignalR.Client.Hubs
 {
-    public class HubProxy :
-#if !WINDOWS_PHONE && !NET35
- DynamicObject,
-#endif
- IHubProxy
+    public class HubProxy : IHubProxy
     {
         private readonly string _hubName;
-        private readonly IConnection _connection;
+        private readonly IHubConnection _connection;
         private readonly Dictionary<string, JToken> _state = new Dictionary<string, JToken>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, Subscription> _subscriptions = new Dictionary<string, Subscription>(StringComparer.OrdinalIgnoreCase);
 
-        public HubProxy(IConnection connection, string hubName)
+        public HubProxy(IHubConnection connection, string hubName)
         {
             _connection = connection;
             _hubName = hubName;
@@ -46,6 +42,11 @@ namespace Microsoft.AspNet.SignalR.Client.Hubs
                     _state[name] = value;
                 }
             }
+        }
+
+        public JsonSerializer JsonSerializer
+        {
+            get { return _connection.JsonSerializer; }
         }
 
         public Subscription Subscribe(string eventName)
@@ -72,76 +73,138 @@ namespace Microsoft.AspNet.SignalR.Client.Hubs
 
         public Task<T> Invoke<T>(string method, params object[] args)
         {
+            return Invoke<T, object>(method, onProgress: null, args: args);
+        }
+
+        public Task Invoke<T>(string method, Action<T> onProgress, params object[] args)
+        {
+            return Invoke<object, T>(method, onProgress, args);
+        }
+
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "Exceptions are flown to the caller")]
+        public Task<TResult> Invoke<TResult, TProgress>(string method, Action<TProgress> onProgress, params object[] args)
+        {
             if (method == null)
             {
                 throw new ArgumentNullException("method");
             }
 
+            if (args == null)
+            {
+                throw new ArgumentNullException("args");
+            }
+
             var tokenifiedArguments = new JToken[args.Length];
             for (int i = 0; i < tokenifiedArguments.Length; i++)
             {
-                tokenifiedArguments[i] = JToken.FromObject(args[i]);
+                tokenifiedArguments[i] = args[i] != null
+                    ? JToken.FromObject(args[i], JsonSerializer)
+                    : JValue.CreateNull();
             }
+
+            var tcs = new DispatchingTaskCompletionSource<TResult>();
+            var callbackId = _connection.RegisterCallback(result =>
+            {
+                if (result != null)
+                {
+                    if (result.Error != null)
+                    {
+                        if (result.IsHubException.HasValue && result.IsHubException.Value)
+                        {
+                            // A HubException was thrown
+                            tcs.TrySetException(new HubException(result.Error, result.ErrorData));
+                        }
+                        else
+                        {
+                            tcs.TrySetException(new InvalidOperationException(result.Error));
+                        }
+                    }
+                    else
+                    {
+                        try
+                        {
+                            if (result.State != null)
+                            {
+                                foreach (var pair in result.State)
+                                {
+                                    this[pair.Key] = pair.Value;
+                                }
+                            }
+
+                            if (result.ProgressUpdate != null)
+                            {
+                                onProgress(result.ProgressUpdate.Data.ToObject<TProgress>(JsonSerializer));
+                            }
+                            else if (result.Result != null)
+                            {
+                                tcs.TrySetResult(result.Result.ToObject<TResult>(JsonSerializer));
+                            }
+                            else
+                            {
+                                tcs.TrySetResult(default(TResult));
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            // If we failed to set the result for some reason or to update
+                            // state then just fail the tcs.
+                            tcs.TrySetUnwrappedException(ex);
+                        }
+                    }
+                }
+                else
+                {
+                    tcs.TrySetCanceled();
+                }
+            });
 
             var hubData = new HubInvocation
             {
                 Hub = _hubName,
                 Method = method,
                 Args = tokenifiedArguments,
-                State = _state
+                CallbackId = callbackId
             };
 
-            var value = JsonConvert.SerializeObject(hubData);
+            string value = null;
 
-            return _connection.Send<HubResult<T>>(value).Then(result =>
+            lock (_state)
             {
-                if (result != null)
+                if (_state.Count != 0)
                 {
-                    if (result.Error != null)
-                    {
-                        throw new InvalidOperationException(result.Error);
-                    }
+                    hubData.State = _state;
 
-                    if (result.State != null)
-                    {
-                        foreach (var pair in result.State)
-                        {
-                            this[pair.Key] = pair.Value;
-                        }
-                    }
-
-                    return result.Result;
+                    // Only keep the _state lock during JsonSerializeObject if hubData.State is set to _state.
+                    value = _connection.JsonSerializeObject(hubData);
                 }
-                return default(T);
-            });
-        }
+            }
 
-#if !WINDOWS_PHONE && !NET35
-        public override bool TrySetMember(SetMemberBinder binder, object value)
-        {
-            this[binder.Name] = value as JToken ?? JToken.FromObject(value);
-            return true;
-        }
+            value = value ?? _connection.JsonSerializeObject(hubData);
 
-        public override bool TryGetMember(GetMemberBinder binder, out object result)
-        {
-            result = this[binder.Name];
-            return true;
-        }
-
-        public override bool TryInvokeMember(InvokeMemberBinder binder, object[] args, out object result)
-        {
-            result = Invoke(binder.Name, args);
-            return true;
-        }
-#endif
-
-        public void InvokeEvent(string eventName, JToken[] args)
-        {
-            Subscription eventObj;
-            if (_subscriptions.TryGetValue(eventName, out eventObj))
+            _connection.Send(value).ContinueWith(task =>
             {
-                eventObj.OnData(args);
+                if (task.IsCanceled)
+                {
+                    _connection.RemoveCallback(callbackId);
+                    tcs.TrySetCanceled();
+                }
+                else if (task.IsFaulted)
+                {
+                    _connection.RemoveCallback(callbackId);
+                    tcs.TrySetUnwrappedException(task.Exception);
+                }
+            },
+            TaskContinuationOptions.NotOnRanToCompletion);
+
+            return tcs.Task;
+        }
+
+        public void InvokeEvent(string eventName, IList<JToken> args)
+        {
+            Subscription subscription;
+            if (_subscriptions.TryGetValue(eventName, out subscription))
+            {
+                subscription.OnReceived(args);
             }
         }
     }

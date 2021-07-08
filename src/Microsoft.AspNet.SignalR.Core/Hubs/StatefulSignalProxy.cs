@@ -1,31 +1,36 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Dynamic;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
     public class StatefulSignalProxy : SignalProxy
     {
-        private readonly TrackingDictionary _state;
+        private readonly StateChangeTracker _tracker;
 
-        public StatefulSignalProxy(Func<string, ClientHubInvocation, IEnumerable<string>, Task> send, string signal, string hubName, TrackingDictionary state)
-            : base(send, signal, hubName)
+        public StatefulSignalProxy(IConnection connection, IHubPipelineInvoker invoker, string signal, string hubName, string prefix, StateChangeTracker tracker)
+            : base(connection, invoker, signal, prefix, hubName, ListHelper<string>.Empty)
         {
-            _state = state;
+            _tracker = tracker;
         }
 
+        [SuppressMessage("Microsoft.Design", "CA1062:Validate arguments of public methods", MessageId = "0", Justification = "The compiler generates calls to invoke this")]
         public override bool TrySetMember(SetMemberBinder binder, object value)
         {
-            _state[binder.Name] = value;
+            _tracker[binder.Name] = value;
             return true;
         }
 
+        [SuppressMessage("Microsoft.Design", "CA1062:Validate arguments of public methods", MessageId = "0", Justification = "The compiler generates calls to invoke this")]
         public override bool TryGetMember(GetMemberBinder binder, out object result)
         {
-            result = _state[binder.Name];
+            result = _tracker[binder.Name];
             return true;
         }
 
@@ -33,11 +38,10 @@ namespace Microsoft.AspNet.SignalR.Hubs
         {
             return new ClientHubInvocation
             {
-                Hub = _hubName,
+                Hub = HubName,
                 Method = method,
                 Args = args,
-                Target = _signal,
-                State = _state.GetChanges()
+                State = _tracker.GetChanges()
             };
         }
     }

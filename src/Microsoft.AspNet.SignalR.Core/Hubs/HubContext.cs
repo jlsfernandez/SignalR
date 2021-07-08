@@ -1,55 +1,22 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
-    internal class HubContext : IHubContext
+    internal class HubContext : IHubContext<object>, IHubContext
     {
-        public HubContext(Func<string, ClientHubInvocation, IEnumerable<string>, Task> send, string hubName, IConnection connection)
+        public HubContext(IConnection connection, IHubPipelineInvoker invoker, string hubName)
         {
-            Clients = new ExternalHubConnectionContext(send, hubName);
-            Groups = new GroupManager(connection, hubName);
+            Clients = new HubConnectionContextBase(connection, invoker, hubName);
+            Groups = new GroupManager(connection, PrefixHelper.GetHubGroupName(hubName));
         }
 
-        public IHubConnectionContext Clients { get; private set; }
+        public IHubConnectionContext<dynamic> Clients { get; private set; }
 
         public IGroupManager Groups { get; private set; }
-
-        private class ExternalHubConnectionContext : IHubConnectionContext
-        {
-            private readonly Func<string, ClientHubInvocation, IEnumerable<string>, Task> _send;
-            private readonly string _hubName;
-
-            public ExternalHubConnectionContext(Func<string, ClientHubInvocation, IEnumerable<string>, Task> send, string hubName)
-            {
-                _send = send;
-                _hubName = hubName;
-                All = AllExcept();
-            }
-
-            public dynamic All
-            {
-                get;
-                private set;
-            }
-
-            public dynamic AllExcept(params string[] exclude)
-            {
-                return new ClientProxy(_send, _hubName, exclude);
-            }
-
-            public dynamic Group(string groupName, params string[] exclude)
-            {
-                return new SignalProxy(_send, groupName, _hubName, exclude);
-            }
-
-            public dynamic Client(string connectionId)
-            {
-                return new SignalProxy(_send, connectionId, _hubName);
-            }
-        }
     }
 }

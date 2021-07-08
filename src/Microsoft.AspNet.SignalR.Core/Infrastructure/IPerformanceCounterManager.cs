@@ -1,6 +1,6 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
-using System.Diagnostics;
 using System.Threading;
 
 namespace Microsoft.AspNet.SignalR.Infrastructure
@@ -18,6 +18,15 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         void Initialize(string instanceName, CancellationToken hostShutdownToken);
 
         /// <summary>
+        /// Loads a performance counter.
+        /// </summary>
+        /// <param name="categoryName">The category name.</param>
+        /// <param name="counterName">The counter name.</param>
+        /// <param name="instanceName">The instance name.</param>
+        /// <param name="isReadOnly">Whether the counter is read-only.</param>
+        IPerformanceCounter LoadCounter(string categoryName, string counterName, string instanceName, bool isReadOnly);
+
+        /// <summary>
         /// Gets the performance counter representing the total number of connection Connect events since the application was started.
         /// </summary>
         IPerformanceCounter ConnectionsConnected { get; }
@@ -33,17 +42,37 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         IPerformanceCounter ConnectionsDisconnected { get; }
 
         /// <summary>
+        /// Gets the performance counter representing the number of connections currently connected using ForeverFrame transport.
+        /// </summary>
+        IPerformanceCounter ConnectionsCurrentForeverFrame { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of connections currently connected using LongPolling transport.
+        /// </summary>
+        IPerformanceCounter ConnectionsCurrentLongPolling { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of connections currently connected using ServerSentEvents transport.
+        /// </summary>
+        IPerformanceCounter ConnectionsCurrentServerSentEvents { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of connections currently connected using WebSockets transport.
+        /// </summary>
+        IPerformanceCounter ConnectionsCurrentWebSockets { get; }
+
+        /// <summary>
         /// Gets the performance counter representing the number of connections currently connected.
         /// </summary>
         IPerformanceCounter ConnectionsCurrent { get; }
 
         /// <summary>
-        /// Gets the performance counter representing the toal number of messages received by connections (server to client) since the application was started.
+        /// Gets the performance counter representing the total number of messages received by connections (server to client) since the application was started.
         /// </summary>
         IPerformanceCounter ConnectionMessagesReceivedTotal { get; }
 
         /// <summary>
-        /// Gets the performance counter representing the toal number of messages received by connections (server to client) since the application was started.
+        /// Gets the performance counter representing the total number of messages received by connections (server to client) since the application was started.
         /// </summary>
         IPerformanceCounter ConnectionMessagesSentTotal { get; }
 
@@ -56,6 +85,21 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         /// Gets the performance counter representing the number of messages sent by connections (client to server) per second.
         /// </summary>
         IPerformanceCounter ConnectionMessagesSentPerSec { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the total number of messages received by subscribers since the application was started.
+        /// </summary>
+        IPerformanceCounter MessageBusMessagesReceivedTotal { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of messages received by a subscribers per second.
+        /// </summary>
+        IPerformanceCounter MessageBusMessagesReceivedPerSec { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of messages received by the scaleout message bus per second.
+        /// </summary>
+        IPerformanceCounter ScaleoutMessageBusMessagesReceivedPerSec { get; }
 
         /// <summary>
         /// Gets the performance counter representing the total number of messages published to the message bus since the application was started.
@@ -91,6 +135,11 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         /// Gets the performance counter representing the number of workers currently busy delivering messages in the message bus.
         /// </summary>
         IPerformanceCounter MessageBusBusyWorkers { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing representing the current number of topics in the message bus.
+        /// </summary>
+        IPerformanceCounter MessageBusTopicsCurrent { get; }
 
         /// <summary>
         /// Gets the performance counter representing the total number of all errors processed since the application was started.
@@ -131,5 +180,35 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         /// Gets the performance counter representing the number of transport errors per second.
         /// </summary>
         IPerformanceCounter ErrorsTransportPerSec { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of logical streams in the currently configured scaleout message bus provider.
+        /// </summary>
+        IPerformanceCounter ScaleoutStreamCountTotal { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of logical streams in the currently configured scaleout message bus provider that are in the open state.
+        /// </summary>
+        IPerformanceCounter ScaleoutStreamCountOpen { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of logical streams in the currently configured scaleout message bus provider that are in the buffering state.
+        /// </summary>
+        IPerformanceCounter ScaleoutStreamCountBuffering { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the total number of scaleout errors since the application was started.
+        /// </summary>
+        IPerformanceCounter ScaleoutErrorsTotal { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of scaleout errors per second.
+        /// </summary>
+        IPerformanceCounter ScaleoutErrorsPerSec { get; }
+
+        /// <summary>
+        /// Gets the performance counter representing the current scaleout send queue length.
+        /// </summary>
+        IPerformanceCounter ScaleoutSendQueueLength { get; }
     }
 }

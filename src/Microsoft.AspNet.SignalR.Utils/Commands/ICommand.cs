@@ -1,4 +1,7 @@
-﻿
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+
+
 namespace Microsoft.AspNet.SignalR.Utils
 {
     internal interface ICommand
@@ -6,6 +9,6 @@ namespace Microsoft.AspNet.SignalR.Utils
         string DisplayName { get; }
         string Help { get; }
         string[] Names { get; }
-        void Execute(string[] args);
+        int Execute(string[] args);
     }
 }

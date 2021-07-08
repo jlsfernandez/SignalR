@@ -1,15 +1,25 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
-using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Client.Http;
 using Microsoft.AspNet.SignalR.Client.Infrastructure;
+using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Client.Transports
 {
     public class LongPollingTransport : HttpBasedTransport
     {
+        private IRequest _currentRequest;
+        private int _running;
+        private readonly object _stopLock = new object();
+        private ThreadSafeInvoker _reconnectInvoker;
+        private IDisposable _disconnectRegistration;
+
         /// <summary>
         /// The time to wait after a connection drops to try reconnecting.
         /// </summary>
@@ -19,12 +29,6 @@ namespace Microsoft.AspNet.SignalR.Client.Transports
         /// The time to wait after an error happens to continue polling.
         /// </summary>
         public TimeSpan ErrorDelay { get; set; }
-
-        /// <summary>
-        /// The time to wait after the initial connect http request before it is considered
-        /// open.
-        /// </summary>
-        public TimeSpan ConnectDelay { get; set; }
 
         public LongPollingTransport()
             : this(new DefaultHttpClient())
@@ -36,172 +40,286 @@ namespace Microsoft.AspNet.SignalR.Client.Transports
         {
             ReconnectDelay = TimeSpan.FromSeconds(5);
             ErrorDelay = TimeSpan.FromSeconds(2);
-            ConnectDelay = TimeSpan.FromSeconds(2);
         }
 
-        protected override void OnStart(IConnection connection, string data, Action initializeCallback, Action<Exception> errorCallback)
+        /// <summary>
+        /// Indicates whether or not the transport supports keep alive
+        /// </summary>
+        public override bool SupportsKeepAlive
         {
-            PollingLoop(connection, data, initializeCallback, errorCallback);
-        }
-
-        private void PollingLoop(IConnection connection, string data, Action initializeCallback, Action<Exception> errorCallback, bool raiseReconnect = false)
-        {
-            string url = connection.Url;
-
-            var reconnectInvoker = new ThreadSafeInvoker();
-            var callbackInvoker = new ThreadSafeInvoker();
-
-            if (connection.MessageId == null)
+            get
             {
-                url += "connect";
+                return false;
             }
-            else if (raiseReconnect)
-            {
-                url += "reconnect";
+        }
 
-                if (connection.State != ConnectionState.Reconnecting &&
-                    !connection.ChangeState(ConnectionState.Connected, ConnectionState.Reconnecting))
+        protected override void OnStart(IConnection connection, string connectionData, CancellationToken disconnectToken)
+        {
+            _disconnectRegistration = disconnectToken.SafeRegister(state =>
+            {
+                // _reconnectInvoker can be null if disconnectToken is tripped before the polling loop is started
+                if (_reconnectInvoker != null)
+                {
+                    _reconnectInvoker.Invoke();
+                }
+
+                StopPolling();
+            }, null);
+
+            StartPolling(connection, connectionData);
+        }
+
+        protected override void OnStartFailed()
+        {
+            // If the transport fails to initialize we want to silently stop
+            StopPolling();
+        }
+
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes", Justification = "Exceptions are flowed back to user.")]
+        private void Poll(IConnection connection, string connectionData)
+        {
+            // This is to ensure that we do not accidently fire off another poll after being told to stop
+            lock (_stopLock)
+            {
+                // Only poll if we're running
+                if (_running == 0)
                 {
                     return;
                 }
-            }
 
-            url += GetReceiveQueryString(connection, data);
+                // A url is required
+                var url = ResolveUrl(connection, connectionData);
 
-#if NET35
-            Debug.WriteLine(String.Format(System.Globalization.CultureInfo.InvariantCulture, "LP: {0}", (object)url));
-#else
-            Debug.WriteLine("LP: {0}", (object)url);
-#endif
-
-            _httpClient.PostAsync(url, PrepareRequest(connection)).ContinueWith(task =>
-            {
-                // Clear the pending request
-                connection.Items.Remove(HttpRequestKey);
-
-                bool shouldRaiseReconnect = false;
-                bool disconnectedReceived = false;
-
-                try
+                HttpClient.Post(url, request =>
                 {
-                    if (!task.IsFaulted)
-                    {
-                        if (raiseReconnect)
-                        {
-                            // If the timeout for the reconnect hasn't fired as yet just fire the 
-                            // event here before any incoming messages are processed
-                            reconnectInvoker.Invoke((conn) => FireReconnected(conn), connection);
-                        }
+                    connection.PrepareRequest(request);
+                    _currentRequest = request;
 
-                        if (initializeCallback != null)
-                        {
-                            // If the timeout for connect hasn't fired as yet then just fire
-                            // the event before any incoming messages are processed
-                            callbackInvoker.Invoke(initializeCallback);
-                        }
-
-                        // Get the response
-                        var raw = task.Result.ReadAsString();
-
-#if NET35
-                        Debug.WriteLine(String.Format(System.Globalization.CultureInfo.InvariantCulture, "LP Receive: {0}", (object)raw));
-#else
-                        Debug.WriteLine("LP Receive: {0}", (object)raw);
-#endif
-
-                        ProcessResponse(connection, raw, out shouldRaiseReconnect, out disconnectedReceived);
-                    }
-                }
-                finally
+                    // This is called just prior to posting the request to ensure that any in-flight polling request
+                    // is always executed before an OnAfterPoll
+                    TryDelayedReconnect(connection, _reconnectInvoker);
+                }, isLongRunning: true)
+                .ContinueWith(task =>
                 {
-                    if (disconnectedReceived)
+                    var next = TaskAsyncHelper.Empty;
+                    Exception exception = null;
+
+                    if (task.IsFaulted || task.IsCanceled)
                     {
-                        connection.Stop();
+                        exception = task.IsCanceled
+                            ? new OperationCanceledException(Resources.Error_TaskCancelledException)
+                            : task.Exception.Unwrap();
+
+                        OnError(connection, exception);
                     }
                     else
                     {
-                        bool requestAborted = false;
-
-                        if (task.IsFaulted)
+                        try
                         {
-                            reconnectInvoker.Invoke();
-
-                            // Raise the reconnect event if we successfully reconnect after failing
-                            shouldRaiseReconnect = true;
-
-                            // Get the underlying exception
-                            Exception exception = task.Exception.Unwrap();
-
-                            // If the error callback isn't null then raise it and don't continue polling
-                            if (errorCallback != null)
-                            {
-                                callbackInvoker.Invoke((cb, ex) => cb(ex), errorCallback, exception);
-                            }
-                            else
-                            {
-                                // Figure out if the request was aborted
-                                requestAborted = ExceptionHelper.IsRequestAborted(exception);
-
-                                // Sometimes a connection might have been closed by the server before we get to write anything
-                                // so just try again and don't raise OnError.
-                                if (!requestAborted && !(exception is IOException))
-                                {
-                                    // Raise on error
-                                    connection.OnError(exception);
-
-                                    // If the connection is still active after raising the error event wait for 2 seconds
-                                    // before polling again so we aren't hammering the server 
-                                    TaskAsyncHelper.Delay(ErrorDelay).Then(() =>
-                                    {
-                                        if (connection.State != ConnectionState.Disconnected)
-                                        {
-                                            PollingLoop(connection,
-                                                data,
-                                                initializeCallback: null,
-                                                errorCallback: null,
-                                                raiseReconnect: shouldRaiseReconnect);
-                                        }
-                                    });
-                                }
-                            }
+                            next = task.Result.ReadAsString(readBuffer => OnChunk(connection, readBuffer))
+                                .Then(raw => OnMessage(connection, raw));
                         }
-                        else
+                        catch (Exception ex)
                         {
-                            if (connection.State != ConnectionState.Disconnected)
-                            {
-                                // Continue polling if there was no error
-                                PollingLoop(connection,
-                                            data,
-                                            initializeCallback: null,
-                                            errorCallback: null,
-                                            raiseReconnect: shouldRaiseReconnect);
-                            }
+                            exception = ex;
+
+                            OnError(connection, exception);
                         }
                     }
-                }
-            });
 
-            if (initializeCallback != null)
-            {
-                TaskAsyncHelper.Delay(ConnectDelay).Then(() =>
-                {
-                    callbackInvoker.Invoke(initializeCallback);
-                });
-            }
-
-            if (raiseReconnect)
-            {
-                TaskAsyncHelper.Delay(ReconnectDelay).Then(() =>
-                {
-                    // Fire the reconnect event after the delay. This gives the 
-                    reconnectInvoker.Invoke((conn) => FireReconnected(conn), connection);
+                    next.Finally(
+                        state => OnAfterPoll((Exception) state).Then(() => Poll(connection, connectionData)),
+                        exception);
                 });
             }
         }
 
         /// <summary>
-        /// 
+        /// Starts the polling loop.
         /// </summary>
+        internal void StartPolling(IConnection connection, string connectionData)
+        {
+            if (Interlocked.Exchange(ref _running, 1) == 0)
+            {
+                // reconnectInvoker is created new on each poll
+                _reconnectInvoker = new ThreadSafeInvoker();
+
+                Poll(connection, connectionData);
+            }
+        }
+
+        /// <summary>
+        /// Fully stops the polling loop.
+        /// </summary>
+        private void StopPolling()
+        {
+            lock (_stopLock)
+            {
+                if (Interlocked.Exchange(ref _running, 0) == 1)
+                {
+                    _disconnectRegistration.Dispose();
+
+                    // Complete any ongoing calls to Abort()
+                    // If someone calls Abort() later, have it no-op
+                    AbortHandler.CompleteAbort();
+
+                    if (_currentRequest != null)
+                    {
+                        // This will no-op if the request is already finished
+                        _currentRequest.Abort();
+                    }
+                }
+            }
+        }
+
+        private string ResolveUrl(IConnection connection, string connectionData)
+        {
+            string url;
+
+            if (connection.MessageId == null)
+            {
+                url = UrlBuilder.BuildConnect(connection, Name, connectionData);
+                connection.Trace(TraceLevels.Events, "LP Connect: {0}", url);
+            }
+            else if (IsReconnecting(connection))
+            {
+                url = UrlBuilder.BuildReconnect(connection, Name, connectionData);
+                connection.Trace(TraceLevels.Events, "LP Reconnect: {0}", url);
+            }
+            else
+            {
+                url = UrlBuilder.BuildPoll(connection, Name, connectionData);
+                connection.Trace(TraceLevels.Events, "LP Poll: {0}", url);
+            }
+
+            return url;
+        }
+
+        private void OnMessage(IConnection connection, string message)
+        {
+            connection.Trace(TraceLevels.Messages, "LP: OnMessage({0})", message);
+
+            var shouldReconnect = ProcessResponse(connection, message);
+
+            if (IsReconnecting(connection))
+            {
+                // If the timeout for the reconnect hasn't fired as yet just fire the 
+                // event here before any incoming messages are processed
+                TryReconnect(connection, _reconnectInvoker);
+            }
+
+            // Don't reconnect if Start() never succeeded.
+            if (shouldReconnect && !TryFailStart(new IOException(Resources.Error_TransportDisconnectedBeforeConnectionFullyInitialized)))
+            {
+                // Transition into reconnecting state
+                connection.EnsureReconnecting();
+            }
+        }
+
+        private Task OnAfterPoll(Exception exception)
+        {
+            if (AbortHandler.TryCompleteAbort())
+            {
+                // Abort() was called, so don't reconnect
+                StopPolling();
+            }
+            else
+            {
+                _reconnectInvoker = new ThreadSafeInvoker();
+
+                if (exception != null)
+                {
+                    // Delay polling by the error delay
+                    return TaskAsyncHelper.Delay(ErrorDelay);
+                }
+            }
+
+            return TaskAsyncHelper.Empty;
+        }
+
+        // internal virtual for testing
+        internal virtual void OnError(IConnection connection, Exception exception)
+        {
+            // Prevent the reconnecting -> connected transition from happening if it hasn't already.
+            _reconnectInvoker.Invoke();
+
+            if (TryFailStart(exception))
+            {
+                return;
+            }
+
+            if (!TransportHelper.VerifyLastActive(connection))
+            {
+                StopPolling();
+            }
+            else
+            {
+                // Do the connected -> reconnecting transition if it hasn't already occurred.
+                connection.EnsureReconnecting();
+            }
+
+            // Sometimes a connection might have been closed by the server before we get to write anything
+            // so just try again and raise OnError.
+            if (!ExceptionHelper.IsRequestAborted(exception) && !(exception is IOException))
+            {
+                connection.OnError(exception);
+            }
+        }
+
+        private static bool OnChunk(IConnection connection, ArraySegment<byte> readBuffer)
+        {
+            if (IsKeepAlive(readBuffer))
+            {
+                connection.MarkLastMessage();
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool IsKeepAlive(ArraySegment<byte> readBuffer)
+        {
+            return readBuffer.Count == 1
+                && readBuffer.Array[readBuffer.Offset] == (byte)' ';
+        }
+
+        /// <summary>
+        /// Aborts the currently active polling request thereby forcing a reconnect.
+        /// </summary>
+        public override void LostConnection(IConnection connection)
+        {
+            if (TryFailStart(new IOException(Resources.Error_TransportDisconnectedBeforeConnectionFullyInitialized)))
+            {
+                return;
+            }
+
+            if (connection.EnsureReconnecting())
+            {
+                lock (_stopLock)
+                {
+                    if (_currentRequest != null)
+                    {
+                        _currentRequest.Abort();
+                    }
+                }
+            }
+        }
+
+        private void TryDelayedReconnect(IConnection connection, ThreadSafeInvoker reconnectInvoker)
+        {
+            if (IsReconnecting(connection))
+            {
+                // Fire the reconnect event after the delay.
+                TaskAsyncHelper.Delay(ReconnectDelay)
+                    .Then(() => TryReconnect(connection, reconnectInvoker));
+            }
+        }
+
+        private static void TryReconnect(IConnection connection, ThreadSafeInvoker reconnectInvoker)
+        {
+            reconnectInvoker.Invoke(FireReconnected, connection);
+        }
+
         private static void FireReconnected(IConnection connection)
         {
             // Mark the connection as connected
@@ -209,6 +327,11 @@ namespace Microsoft.AspNet.SignalR.Client.Transports
             {
                 connection.OnReconnected();
             }
+        }
+
+        private static bool IsReconnecting(IConnection connection)
+        {
+            return connection.State == ConnectionState.Reconnecting;
         }
     }
 }

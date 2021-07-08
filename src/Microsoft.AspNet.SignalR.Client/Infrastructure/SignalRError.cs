@@ -1,4 +1,5 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Net;
@@ -10,7 +11,7 @@ namespace Microsoft.AspNet.SignalR.Client
     /// </summary>
     public class SignalRError : IDisposable
     {
-        private HttpWebResponse _response;
+        private IDisposable _response;
 
         /// <summary>
         /// Create custom SignalR based error.
@@ -21,7 +22,7 @@ namespace Microsoft.AspNet.SignalR.Client
             Exception = exception;
         }
 
-        internal void SetResponse(HttpWebResponse response)
+        internal void SetResponse(IDisposable response)
         {
             _response = response;
         }
@@ -50,15 +51,23 @@ namespace Microsoft.AspNet.SignalR.Client
             return Exception.ToString();
         }
 
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (_response != null)
+                {
+                    _response.Dispose();
+                }
+            }
+        }
+
         /// <summary>
         /// Dispose of the response
         /// </summary>
         public void Dispose()
         {
-            if (_response != null)
-            {
-                _response.Close();
-            }
+            Dispose(true);
         }
     }
 }

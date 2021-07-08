@@ -1,6 +1,10 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
+using System;
+using System.Collections.Generic;
 using System.Linq;
+using Microsoft.AspNet.SignalR.Json;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
@@ -14,12 +18,22 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <returns>The parameter value.</returns>
         public virtual object ResolveParameter(ParameterDescriptor descriptor, IJsonValue value)
         {
-            if (value.GetType() == descriptor.Type)
+            if (descriptor == null)
+            {
+                throw new ArgumentNullException("descriptor");
+            }
+
+            if (value == null)
+            {
+                throw new ArgumentNullException("value");
+            }
+
+            if (value.GetType() == descriptor.ParameterType)
             {
                 return value;
             }
 
-            return value.ConvertTo(descriptor.Type);
+            return value.ConvertTo(descriptor.ParameterType);
         }
 
         /// <summary>
@@ -28,8 +42,13 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <param name="method">Method descriptor.</param>
         /// <param name="values">List of values to resolve parameter values from.</param>
         /// <returns>Array of parameter values.</returns>
-        public virtual object[] ResolveMethodParameters(MethodDescriptor method, params IJsonValue[] values)
+        public virtual IList<object> ResolveMethodParameters(MethodDescriptor method, IList<IJsonValue> values)
         {
+            if (method == null)
+            {
+                throw new ArgumentNullException("method");
+            }
+
             return method.Parameters.Zip(values, ResolveParameter).ToArray();
         }
     }

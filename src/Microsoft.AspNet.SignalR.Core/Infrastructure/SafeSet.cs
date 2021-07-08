@@ -1,4 +1,5 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -36,9 +37,9 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
             return _items.ContainsKey(item);
         }
 
-        public void Add(T item)
+        public bool Add(T item)
         {
-            _items.TryAdd(item, null);
+            return _items.TryAdd(item, null);
         }
 
         public bool Remove(T item)

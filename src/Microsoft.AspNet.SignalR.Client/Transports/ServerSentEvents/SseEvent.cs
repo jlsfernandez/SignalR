@@ -1,4 +1,5 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 
@@ -8,21 +9,26 @@ namespace Microsoft.AspNet.SignalR.Client.Transports.ServerSentEvents
     {
         public SseEvent(EventType type, string data)
         {
-            Type = type;
+            EventType = type;
             Data = data;
         }
 
-        public EventType Type { get; private set; }
+        public EventType EventType { get; private set; }
         public string Data { get; private set; }
 
         public override string ToString()
         {
-            return Type + ": " + Data;
+            return EventType + ": " + Data;
         }
 
         public static bool TryParse(string line, out SseEvent sseEvent)
         {
             sseEvent = null;
+
+            if (line == null)
+            {
+                throw new ArgumentNullException("line");
+            }
 
             if (line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
             {

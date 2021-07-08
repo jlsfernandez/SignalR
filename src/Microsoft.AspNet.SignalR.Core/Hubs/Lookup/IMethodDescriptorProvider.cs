@@ -1,6 +1,9 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using Microsoft.AspNet.SignalR.Json;
 using Newtonsoft.Json.Linq;
 
 namespace Microsoft.AspNet.SignalR.Hubs
@@ -25,6 +28,7 @@ namespace Microsoft.AspNet.SignalR.Hubs
         /// <param name="descriptor">Descriptor of the method, if found. Null otherwise.</param>
         /// <param name="parameters">Method parameters to match.</param>
         /// <returns>True, if a method has been found.</returns>
-        bool TryGetMethod(HubDescriptor hub, string method, out MethodDescriptor descriptor, params IJsonValue[] parameters);
+        [SuppressMessage("Microsoft.Design", "CA1021:AvoidOutParameters", MessageId = "2#", Justification = "This is a well known pattern for efficient lookup")]
+        bool TryGetMethod(HubDescriptor hub, string method, out MethodDescriptor descriptor, IList<IJsonValue> parameters);
     }
 }

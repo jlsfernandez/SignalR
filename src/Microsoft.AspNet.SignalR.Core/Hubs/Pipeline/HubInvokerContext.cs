@@ -1,18 +1,18 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+
+using System.Collections.Generic;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
-    /// <summary>
-    /// 
-    /// </summary>
-    public class HubInvokerContext : IHubIncomingInvokerContext
+    internal class HubInvokerContext : IHubIncomingInvokerContext
     {
-        public HubInvokerContext(IHub hub, TrackingDictionary state, MethodDescriptor methodDescriptor, object[] args)
+        public HubInvokerContext(IHub hub, StateChangeTracker tracker, MethodDescriptor methodDescriptor, IList<object> args)
         {
             Hub = hub;
             MethodDescriptor = methodDescriptor;
             Args = args;
-            State = state;
+            StateTracker = tracker;
         }
 
         public IHub Hub
@@ -27,14 +27,14 @@ namespace Microsoft.AspNet.SignalR.Hubs
             private set;
         }
 
-        public object[] Args
+        public IList<object> Args
         {
             get;
             private set;
         }
 
 
-        public TrackingDictionary State
+        public StateChangeTracker StateTracker
         {
             get;
             private set;

@@ -1,12 +1,18 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
-using System.Diagnostics;
+using System;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.IO;
-using System.Text;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Hosting;
+using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Json;
 
 namespace Microsoft.AspNet.SignalR.Transports
 {
+    [SuppressMessage("Microsoft.Design", "CA1001:TypesThatOwnDisposableFieldsShouldBeDisposable", Justification = "Disposable fields are disposed from a different method")]
     public class ForeverFrameTransport : ForeverTransport
     {
         private const string _initPrefix = "<!DOCTYPE html>" +
@@ -21,85 +27,174 @@ namespace Microsoft.AspNet.SignalR.Transports
         private const string _initSuffix = "') : null,\r\n" +
                                             "        r = ff ? ff.receive : function() {};\r\n" +
                                             "    ff ? ff.started(c) : '';" +
-                                            "</script></head>" + 
+                                            "</script></head>" +
                                             "<body>\r\n";
 
-        private readonly bool _isDebug;
+        private readonly IPerformanceCounterManager _counters;
 
         public ForeverFrameTransport(HostContext context, IDependencyResolver resolver)
+            : this(context, resolver, resolver.Resolve<IPerformanceCounterManager>())
+        {
+        }
+
+        public ForeverFrameTransport(HostContext context, IDependencyResolver resolver, IPerformanceCounterManager performanceCounterManager)
             : base(context, resolver)
         {
-            _isDebug = context.IsDebuggingEnabled();
+            _counters = performanceCounterManager;
+        }
+
+        public override void IncrementConnectionsCount()
+        {
+            _counters.ConnectionsCurrentForeverFrame.Increment();
+        }
+
+        public override void DecrementConnectionsCount()
+        {
+            _counters.ConnectionsCurrentForeverFrame.Decrement();
         }
 
         public override Task KeepAlive()
         {
-            OutputWriter.Write("<script>r(c, {});</script>");
-            OutputWriter.WriteLine();
-            OutputWriter.WriteLine();
-            OutputWriter.Flush();
-
-            return Context.Response.FlushAsync();
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return EnqueueOperation(state => PerformKeepAlive(state), this);
         }
 
         public override Task Send(PersistentResponse response)
         {
             OnSendingResponse(response);
 
-            OutputWriter.Write("<script>r(c, ");
-            JsonSerializer.Serialize(response, OutputWriter);
-            OutputWriter.Write(");</script>\r\n");
-            OutputWriter.Flush();
+            var context = new ForeverFrameTransportContext(this, response);
 
-            return Context.Response.FlushAsync().Catch(IncrementErrorCounters);
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return EnqueueOperation(s => PerformSend(s), context);
         }
 
-        protected override Task InitializeResponse(ITransportConnection connection)
+        protected internal override Task InitializeResponse(ITransportConnection connection)
         {
-            return base.InitializeResponse(connection)
-                .Then(initScript =>
-                {
-                    Context.Response.ContentType = "text/html";
-                    OutputWriter.Write(initScript);
-                    OutputWriter.Flush();
-
-                    return Context.Response.FlushAsync();
-                },
-                _initPrefix + Context.Request.QueryString["frameId"] + _initSuffix);
-        }
-
-        private class TextWriterWrapper : TextWriter
-        {
-            private readonly TextWriter _writer;
-
-            public TextWriterWrapper(TextWriter writer)
+            uint frameId;
+            string rawFrameId = Context.Request.QueryString["frameId"];
+            if (String.IsNullOrWhiteSpace(rawFrameId) || !UInt32.TryParse(rawFrameId, NumberStyles.None, CultureInfo.InvariantCulture, out frameId))
             {
-                _writer = writer;
+                // Invalid frameId passed in
+                throw new InvalidOperationException(Resources.Error_InvalidForeverFrameId);
             }
 
-            public override Encoding Encoding
+            string initScript = _initPrefix +
+                                frameId.ToString(CultureInfo.InvariantCulture) +
+                                _initSuffix;
+
+            var context = new ForeverFrameTransportContext(this, initScript);
+
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return base.InitializeResponse(connection).Then(s => Initialize(s), context);
+        }
+
+        internal override MemoryPoolTextWriter CreateMemoryPoolWriter(IMemoryPool memoryPool)
+        {
+            return new HTMLTextWriter(memoryPool);
+        }
+
+        private static Task Initialize(object state)
+        {
+            var context = (ForeverFrameTransportContext)state;
+
+            var initContext = new ForeverFrameTransportContext(context.Transport, context.State);
+
+            // Ensure delegate continues to use the C# Compiler static delegate caching optimization.
+            return WriteInit(initContext);
+        }
+
+        private static Task WriteInit(ForeverFrameTransportContext context)
+        {
+            context.Transport.Context.Response.ContentType = "text/html; charset=UTF-8";
+
+            using (var htmlOutputWriter = new HTMLTextWriter(context.Transport.Pool))
             {
-                get { return _writer.Encoding; }
+                htmlOutputWriter.NewLine = "\n";
+
+                htmlOutputWriter.WriteRaw((string)context.State);
+                htmlOutputWriter.Flush();
+
+                context.Transport.Context.Response.Write(htmlOutputWriter.Buffer);
+            }
+
+            return context.Transport.Context.Response.Flush();
+        }
+
+        private static Task PerformSend(object state)
+        {
+            var context = (ForeverFrameTransportContext)state;
+
+            using (var htmlOutputWriter = new HTMLTextWriter(context.Transport.Pool))
+            {
+                htmlOutputWriter.NewLine = "\n";
+                htmlOutputWriter.WriteRaw("<script>r(c, ");
+                context.Transport.JsonSerializer.Serialize(context.State, htmlOutputWriter);
+                htmlOutputWriter.WriteRaw(");</script>\r\n");
+                htmlOutputWriter.Flush();
+
+                context.Transport.Context.Response.Write(htmlOutputWriter.Buffer);
+            }
+
+            return context.Transport.Context.Response.Flush();
+        }
+
+        private static Task PerformKeepAlive(object state)
+        {
+            var transport = (ForeverFrameTransport)state;
+
+            using (var htmlOutputWriter = new HTMLTextWriter(transport.Pool))
+            {
+                htmlOutputWriter.NewLine = "\n";
+                htmlOutputWriter.WriteRaw("<script>r(c, {});</script>");
+                htmlOutputWriter.WriteLine();
+                htmlOutputWriter.WriteLine();
+                htmlOutputWriter.Flush();
+
+                transport.Context.Response.Write(htmlOutputWriter.Buffer);
+            }
+
+            return transport.Context.Response.Flush();
+        }
+
+        private struct ForeverFrameTransportContext
+        {
+            public readonly ForeverFrameTransport Transport;
+            public readonly object State;
+
+            public ForeverFrameTransportContext(ForeverFrameTransport transport, object state)
+            {
+                Transport = transport;
+                State = state;
+            }
+        }
+
+        private class HTMLTextWriter : MemoryPoolTextWriter
+        {
+            public HTMLTextWriter(IMemoryPool pool) :
+                base(pool)
+            {
+
+            }
+
+            public void WriteRaw(string value)
+            {
+                base.Write(value);
             }
 
             public override void Write(string value)
             {
-                _writer.Write(EscapeAnyInlineScriptTags(value));
+                base.Write(JavascriptEncode(value));
             }
 
             public override void WriteLine(string value)
             {
-                _writer.Write(EscapeAnyInlineScriptTags(value));
+                base.WriteLine(JavascriptEncode(value));
             }
 
-            public override void WriteLine()
+            private static string JavascriptEncode(string input)
             {
-                _writer.WriteLine();
-            }
-
-            private static string EscapeAnyInlineScriptTags(string input)
-            {
-                return input.Replace("</script>", "</\"+\"script>");
+                return input.Replace("<", "\\u003c").Replace(">", "\\u003e");
             }
         }
     }

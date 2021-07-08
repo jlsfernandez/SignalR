@@ -1,340 +1,91 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
-using System.Collections.Generic;
+using System.ComponentModel.Composition;
+using System.ComponentModel.Composition.Hosting;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
-using Microsoft.AspNet.SignalR.Client.Hubs;
-using Microsoft.AspNet.SignalR.Hosting.Memory;
-using Microsoft.AspNet.SignalR.Hubs;
-using Microsoft.AspNet.SignalR.Transports;
+using CmdLine;
+using Microsoft.AspNet.SignalR.Stress.Infrastructure;
+using Microsoft.AspNet.SignalR.StressServer.Hubs;
 
 namespace Microsoft.AspNet.SignalR.Stress
 {
     class Program
     {
-        private static Timer _rateTimer;
-        private static bool _measuringRate;
-        private static Stopwatch _sw = Stopwatch.StartNew();
-
-        private static double _receivesPerSecond;
-        private static double _peakReceivesPerSecond;
-        private static double _avgReceivesPerSecond;
-        private static long _received;
-        private static long _avgLastReceivedCount;
-        private static long _lastReceivedCount;
-
-        private static double _sendsPerSecond;
-        private static double _peakSendsPerSecond;
-        private static double _avgSendsPerSecond;
-        private static long _sent;
-        private static long _avgLastSendsCount;
-        private static long _lastSendsCount;
-
-        private static DateTime _avgCalcStart;
-        private static long _rate = 1;
-        private static int _runs = 0;
-        private static int _step = 1;
-        private static int _stepInterval = 10;
-        private static int _clients = 5000;
-        private static int _clientsRunning = 0;
-        private static int _senders = 1;
-        private static Exception _exception;
-
-        public static long TotalRate
-        {
-            get
-            {
-                return _rate * _clients;
-            }
-        }
-
         static void Main(string[] args)
         {
-            Debug.Listeners.Add(new ConsoleTraceListener());
-            Debug.AutoFlush = true;
+            IRun run = CreateRun();
 
-            while (true)
+            long memory = 0;
+
+            // When you specify the incorrect run name, the CreateRun() will throw exception
+            using (run)
             {
-                Console.WriteLine("==================================");
-                Console.WriteLine("BEGIN RUN");
-                Console.WriteLine("==================================");
-                StressGroups();
-                Console.WriteLine("==================================");
-                Console.WriteLine("END RUN");
-                Console.WriteLine("==================================");
+                run.Run();
+
+                memory = GC.GetTotalMemory(forceFullCollection: false);
+
+                Console.WriteLine("Before GC {0}", Utility.FormatBytes(memory));
+
+                memory = GC.GetTotalMemory(forceFullCollection: true);
+
+                Console.WriteLine("After GC and before dispose {0}", Utility.FormatBytes(memory));
             }
 
-            //TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
-            ThreadPool.SetMinThreads(32, 32);
+            memory = GC.GetTotalMemory(forceFullCollection: true);
 
-            // RunBusTest();
-            // RunConnectionTest();
-            //RunConnectionReceiveLoopTest();
-            var host = RunMemoryHost();
-
-            Console.ReadLine();
-            host.Dispose();
+            Console.WriteLine("After GC and dispose {0}", Utility.FormatBytes(memory));
         }
 
-        private static void Write(Stream stream, string raw)
+        private static StressArguments ParseArguments()
         {
-            var data = Encoding.Default.GetBytes(raw);
-            stream.Write(data, 0, data.Length);
-        }
-
-        public static void StressGroups()
-        {
-            var host = new MemoryHost();
-            host.HubPipeline.EnableAutoRejoiningGroups();
-            host.MapHubs();
-            int max = 15;
-
-            var countDown = new CountDown(max);
-            var list = Enumerable.Range(0, max).ToList();
-            var connection = new Client.Hubs.HubConnection("http://foo");
-            var proxy = connection.CreateHubProxy("MultGroupHub");
-
-            var bus = (MessageBus)host.DependencyResolver.Resolve<IMessageBus>();
-
-            proxy.On<int>("Do", i =>
-            {
-                lock (list)
-                {
-                    if (!list.Remove(i))
-                    {
-                        Debugger.Break();
-                    }
-                }
-
-                countDown.Dec();
-            });
-
+            StressArguments args = null;
             try
             {
-                connection.Start(host).Wait();
-
-                for (int i = 0; i < max; i++)
-                {
-                    proxy.Invoke("Do", i).Wait();
-                }
-
-                int retry = 3;
-                bool result = false;
-
-                do
-                {
-                    result = countDown.Wait(TimeSpan.FromSeconds(10));
-                    if (!result)
-                    {
-                        Console.WriteLine("Didn't receive " + max + " messages. Got " + (max - countDown.Count) + " missed (" + String.Join(",", list.Select(i => i.ToString())) + ")");
-                        Console.WriteLine("A=" + bus.AllocatedWorkers + " B=" + bus.BusyWorkers);
-                        countDown.Reset();
-                    }
-
-                    retry--;
-
-                } while (retry > 0);
-
-                if (!result)
-                {
-                    Console.WriteLine("A=" + bus.AllocatedWorkers + " B=" + bus.BusyWorkers);
-                    Debugger.Break();
-                }
+                args = CommandLine.Parse<StressArguments>();
             }
-            finally
+            catch (CommandLineException e)
             {
-                connection.Stop();
-                host.Dispose();
-
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
+                Console.WriteLine(e.ArgumentHelp.Message);
+                Console.WriteLine(e.ArgumentHelp.GetHelpText(Console.BufferWidth));
+                Environment.Exit(1);
             }
-
+            return args;
         }
 
-        private static void RunConnectionTest()
+        private static IRun CreateRun()
         {
-            string payload = GetPayload();
+            ThreadPool.SetMinThreads(32, 32);
 
-            var dr = new DefaultDependencyResolver();
-            MeasureStats((MessageBus)dr.Resolve<IMessageBus>());
-            var connectionManager = new ConnectionManager(dr);
-            var context = connectionManager.GetConnectionContext<StressConnection>();
+            var args = ParseArguments();
 
-            for (int i = 0; i < _clients; i++)
+            var compositionContainer = new CompositionContainer(new AssemblyCatalog(typeof(Program).Assembly));
+
+            compositionContainer.ComposeExportedValue(new RunData
             {
-                ThreadPool.QueueUserWorkItem(state =>
-                {
-                    Interlocked.Increment(ref _clientsRunning);
-                    var transportConnection = (ITransportConnection)context.Connection;
-                    transportConnection.Receive(null, r =>
-                    {
-                        Interlocked.Add(ref _received, r.TotalCount);
-                        Interlocked.Add(ref _avgLastReceivedCount, r.TotalCount);
-                        return TaskAsyncHelper.True;
-                    },
-                    maxMessages: 10);
+                SampleRate = args.SampleRate,
+                Warmup = args.Warmup,
+                Duration = args.Duration,
+                Connections = args.Connections,
+                Payload = GetPayload(args.PayloadSize),
+                Senders = args.Senders,
+                Transport = args.Transport,
+                Host = args.Host,
+                Url = args.Url,
+                SendDelay = args.SendDelay,
 
-                }, i);
-            }
-
-            for (var i = 1; i <= _senders; i++)
-            {
-                ThreadPool.QueueUserWorkItem(_ =>
-                {
-                    StartSendLoop(i.ToString(), (source, key, value) => context.Connection.Broadcast(value), payload);
-                });
-            }
-        }
-
-        private static MemoryHost RunMemoryHost()
-        {
-            var host = new MemoryHost();
-            host.MapConnection<StressConnection>("/echo");
-
-            string payload = GetPayload();
-
-            MeasureStats((MessageBus)host.DependencyResolver.Resolve<IMessageBus>());
-
-            Action<PersistentResponse> handler = (r) =>
-            {
-                Interlocked.Add(ref _received, r.TotalCount);
-                Interlocked.Add(ref _avgLastReceivedCount, r.TotalCount);
-            };
-
-            LongPollingTransport.SendingResponse += handler;
-            ForeverFrameTransport.SendingResponse += handler;
-
-            for (int i = 0; i < _clients; i++)
-            {
-                ThreadPool.QueueUserWorkItem(state =>
-                {
-                    Interlocked.Increment(ref _clientsRunning);
-                    string connectionId = state.ToString();
-
-                    //LongPollingLoop(host, connectionId);
-                    ProcessRequest(host, "serverSentEvents", connectionId);
-                }, i);
-            }
-
-            for (var i = 1; i <= _senders; i++)
-            {
-                ThreadPool.QueueUserWorkItem(_ =>
-                {
-                    var context = host.ConnectionManager.GetConnectionContext<StressConnection>();
-                    StartSendLoop(i.ToString(), (source, key, value) => context.Connection.Broadcast(value), payload);
-                });
-            }
-
-            return host;
-        }
-
-        private static void LongPollingLoop(MemoryHost host, string connectionId)
-        {
-        LongPoll:
-            var task = ProcessRequest(host, "longPolling", connectionId);
-
-            if (task.IsCompleted)
-            {
-                task.Wait();
-
-                goto LongPoll;
-            }
-
-            task.ContinueWith(t => LongPollingLoop(host, connectionId));
-        }
-
-        private static Task ProcessRequest(MemoryHost host, string transport, string connectionId)
-        {
-            return host.ProcessRequest("http://foo/echo/connect?transport=" + transport + "&connectionId=" + connectionId, request => { }, null);
-        }
-
-        private static void RunConnectionReceiveLoopTest()
-        {
-            string payload = GetPayload();
-
-            var dr = new DefaultDependencyResolver();
-            MeasureStats((MessageBus)dr.Resolve<IMessageBus>());
-            var connectionManager = new ConnectionManager(dr);
-            var context = connectionManager.GetConnectionContext<StressConnection>();
-
-            for (int i = 0; i < _clients; i++)
-            {
-                ThreadPool.QueueUserWorkItem(state =>
-                {
-                    Interlocked.Increment(ref _clientsRunning);
-                    var transportConnection = (ITransportConnection)context.Connection;
-                    ReceiveLoop(transportConnection, null);
-                }, i);
-            }
-
-            for (var i = 1; i <= _senders; i++)
-            {
-                ThreadPool.QueueUserWorkItem(_ =>
-                {
-                    StartSendLoop(i.ToString(), (source, key, value) => context.Connection.Broadcast(value), payload);
-                });
-            }
-        }
-
-        private static void ReceiveLoop(ITransportConnection connection, string messageId)
-        {
-            connection.ReceiveAsync(messageId, CancellationToken.None, maxMessages: 5000).Then(r =>
-            {
-                Interlocked.Add(ref _received, r.TotalCount);
-                Interlocked.Add(ref _avgLastReceivedCount, r.TotalCount);
-
-                ReceiveLoop(connection, r.MessageId);
+                // Scaleout
+                RedisServer = args.RedisServer,
+                RedisPort = args.RedisPort,
+                RedisPassword = args.RedisPassword,
+                ServiceBusConnectionString = args.ServiceBusConnectionString,
+                SqlConnectionString = args.SqlConnectionString,
+                SqlTableCount = args.SqlTableCount,
             });
-        }
 
-        private static void RunBusTest()
-        {
-            var resolver = new DefaultDependencyResolver();
-            var bus = new MessageBus(resolver);
-            string payload = GetPayload();
-
-            MeasureStats(bus);
-
-            for (int i = 0; i < _clients; i++)
-            {
-                var subscriber = new Subscriber(i.ToString(), new[] { "a", "b", "c" });
-                ThreadPool.QueueUserWorkItem(_ => StartClientLoop(bus, subscriber));
-            }
-
-            for (var i = 1; i <= _senders; i++)
-            {
-                ThreadPool.QueueUserWorkItem(_ => StartSendLoop(i.ToString(), bus.Publish, payload));
-            }
-        }
-
-        private static void StartSendLoop(string clientId, Func<string, string, string, Task> publish, string payload)
-        {
-            while (_exception == null)
-            {
-                long old = _rate;
-                var interval = TimeSpan.FromTicks((TimeSpan.TicksPerSecond / _rate) * _senders);
-                while (Interlocked.Read(ref _rate) == old && _exception == null)
-                {
-                    try
-                    {
-                        publish(clientId, "a", payload).Wait();
-                        Interlocked.Increment(ref _sent);
-                        Interlocked.Increment(ref _avgLastSendsCount);
-
-                        // Thread.Sleep(interval);
-                    }
-                    catch (Exception ex)
-                    {
-                        Interlocked.Exchange(ref _exception, ex);
-                    }
-                }
-            }
+            return compositionContainer.GetExportedValue<IRun>(args.RunName);
         }
 
         private static string GetPayload(int n = 32)
@@ -342,212 +93,62 @@ namespace Microsoft.AspNet.SignalR.Stress
             return new string('a', n);
         }
 
-        static void OnUnobservedTaskException(object sender, UnobservedTaskExceptionEventArgs e)
+        [CommandLineArguments(Program = "Stress")]
+        private class StressArguments
         {
-            Interlocked.Exchange(ref _exception, e.Exception);
-            e.SetObserved();
-        }
+            [CommandLineParameter(Command = "?", Name = "Help", Default = false, Description = "Show Help", IsHelp = true)]
+            public bool Help { get; set; }
 
-        private static void StartClientLoop(MessageBus bus, ISubscriber subscriber)
-        {
-            Interlocked.Increment(ref _clientsRunning);
-            try
-            {
-                bus.Subscribe(subscriber, null, result =>
-                {
-                    Interlocked.Add(ref _received, result.TotalCount);
-                    Interlocked.Add(ref _avgLastReceivedCount, result.TotalCount);
+            [CommandLineParameter(Command = "Url", Required = false, Default = "http://localhost", Description = "URL for external host.")]
+            public string Url { get; set; }
 
-                    return TaskAsyncHelper.True;
-                },
-                messageBufferSize: 10);
-            }
-            catch (Exception ex)
-            {
-                Interlocked.Exchange(ref _exception, ex);
-            }
-        }
+            [CommandLineParameter(Command = "Run", Required = false, Default = "SendReceive", Description = "The type of run to perform. Default: SendReceive")]
+            public string RunName { get; set; }
 
-        public static void MeasureStats(MessageBus bus)
-        {
-            _sw.Start();
-            _avgCalcStart = DateTime.UtcNow;
-            var resultsPath = Guid.NewGuid().ToString() + ".csv";
-            // File.WriteAllText(resultsPath, "Target Rate, RPS, Peak RPS, Avg RPS\n");
+            [CommandLineParameter(Command = "SampleRate", Required = false, Default = 500, Description = "The sampling rate in miliseconds. Default: 500")]
+            public int SampleRate { get; set; }
 
-            _rateTimer = new Timer(_ =>
-            {
-                if (_measuringRate)
-                {
-                    return;
-                }
-                _measuringRate = true;
+            [CommandLineParameter(Command = "SendDelay", Required = false, Default = 0, Description = "The send delay in miliseconds. Default: 0")]
+            public int SendDelay { get; set; }
 
-                try
-                {
-                    var now = DateTime.UtcNow;
-                    var timeDiffSecs = _sw.Elapsed.TotalSeconds;
+            [CommandLineParameter(Command = "Connections", Required = false, Default = 5000, Description = "Number of connections. Default: 5000")]
+            public int Connections { get; set; }
 
-                    _sw.Restart();
+            [CommandLineParameter(Command = "PayloadSize", Required = false, Default = 32, Description = "Payload size in bytes. Default: 32")]
+            public int PayloadSize { get; set; }
 
-                    if (timeDiffSecs <= 0)
-                    {
-                        return;
-                    }
+            [CommandLineParameter(Command = "Senders", Required = false, Default = 1, Description = "Number of senders. Default: 1")]
+            public int Senders { get; set; }
 
-                    if (_exception != null)
-                    {
-                        Console.WriteLine("Failed With:\r\n {0}", _exception.GetBaseException());
-                        _rateTimer.Change(-1, -1);
-                        _rateTimer.Dispose();
-                        _rateTimer = null;
-                        return;
-                    }
+            [CommandLineParameter(Command = "Transport", Required = false, Default = "serverSentEvents", Description = "Transport name. Default: serverSentEvents")]
+            public string Transport { get; set; }
 
-                    Console.Clear();
-                    Console.WriteLine("Started {0} of {1} clients", _clientsRunning, _clients);
+            [CommandLineParameter(Command = "Host", Required = false, Default = "Memory", Description = "Host type name ( Memory, IISExpress, Owin, External ). Default: Memory")]
+            public string Host { get; set; }
 
-                    Console.WriteLine("Total Rate: {0} (mps) = {1} (mps) * {2} (clients)", TotalRate, _rate, _clients);
-                    Console.WriteLine();
+            [CommandLineParameter(Command = "Duration", Required = false, Default = 30, Description = "Duration in seconds. Default: 30")]
+            public int Duration { get; set; }
 
-                    // Sends
-                    var sends = Interlocked.Read(ref _sent);
-                    var sendsDiff = sends - _lastSendsCount;
-                    var sendsPerSec = sendsDiff / timeDiffSecs;
-                    _sendsPerSecond = sendsPerSec;
+            [CommandLineParameter(Command = "Warmup", Required = false, Default = 10, Description = "Warmup duration in seconds. Default: 10")]
+            public int Warmup { get; set; }
 
-                    _lastSendsCount = sends;
+            [CommandLineParameter(Command = "RedisPassword", Required = false, Default = "", Description = "Redis password to use. Default: empty")]
+            public string RedisPassword { get; set; }
 
-                    Console.WriteLine("----- SENDS -----");
+            [CommandLineParameter(Command = "RedisServer", Required = false, Default = "127.0.0.1", Description = "Redis server to use. Default: 127.0.0.1")]
+            public string RedisServer { get; set; }
 
-                    var s1 = Math.Max(0, _rate - _sendsPerSecond);
-                    Console.WriteLine("SPS: {0:N3} (diff: {1:N3}, {2:N2}%)", _sendsPerSecond, s1, s1 * 100.0 / _rate);
-                    var s2 = Math.Max(0, _rate - _peakSendsPerSecond);
-                    Console.WriteLine("Peak SPS: {0:N3} (diff: {1:N2} {2:N2}%)", _peakSendsPerSecond, s2, s2 * 100.0 / _rate);
-                    var s3 = Math.Max(0, _rate - _avgSendsPerSecond);
-                    Console.WriteLine("Avg SPS: {0:N3} (diff: {1:N3} {2:N2}%)", _avgSendsPerSecond, s3, s3 * 100.0 / _rate);
-                    Console.WriteLine();
+            [CommandLineParameter(Command = "RedisPort", Required = false, Default = 6379, Description = "Redis port to use. Default: 6379")]
+            public int RedisPort { get; set; }
 
-                    if (sendsPerSec < long.MaxValue && sendsPerSec > _peakSendsPerSecond)
-                    {
-                        Interlocked.Exchange(ref _peakSendsPerSecond, sendsPerSec);
-                    }
+            [CommandLineParameter(Command = "ServiceBusConnectionString", Required = false, Default = "", Description = "ServiceBus connection string to use. Default: empty")]
+            public string ServiceBusConnectionString { get; set; }
 
-                    _avgSendsPerSecond = _avgLastSendsCount / (now - _avgCalcStart).TotalSeconds;
+            [CommandLineParameter(Command = "SqlConnectionString", Required = false, Default = "Data Source=(local);Initial Catalog=SignalRSamples;Integrated Security=SSPI;MultipleActiveResultSets=true;Asynchronous Processing=True;", Description = "Warmup duration in seconds. Default: Local sql server")]
+            public string SqlConnectionString { get; set; }
 
-                    // Receives
-                    var recv = Interlocked.Read(ref _received);
-                    var recvDiff = recv - _lastReceivedCount;
-                    var recvPerSec = recvDiff / timeDiffSecs;
-                    _receivesPerSecond = recvPerSec;
-
-                    _lastReceivedCount = recv;
-
-                    Console.WriteLine("----- RECEIVES -----");
-
-                    var d1 = Math.Max(0, TotalRate - _receivesPerSecond);
-                    Console.WriteLine("RPS: {0:N3} (diff: {1:N3}, {2:N2}%)", _receivesPerSecond, d1, d1 * 100.0 / TotalRate);
-                    var d2 = Math.Max(0, TotalRate - _peakReceivesPerSecond);
-                    Console.WriteLine("Peak RPS: {0:N3} (diff: {1:N3} {2:N2}%)", _peakReceivesPerSecond, d2, d2 * 100.0 / TotalRate);
-                    var d3 = Math.Max(0, TotalRate - _avgReceivesPerSecond);
-                    Console.WriteLine("Avg RPS: {0:N3} (diff: {1:N3} {2:N2}%)", _avgReceivesPerSecond, d3, d3 * 100.0 / TotalRate);
-                    var d4 = Math.Max(0, _sendsPerSecond - _receivesPerSecond);
-                    Console.WriteLine("Actual RPS: {0:N3} (diff: {1:N3} {2:N2}%)", _receivesPerSecond, d4, d4 * 100.0 / _sendsPerSecond);
-
-                    if (bus != null)
-                    {
-                        Console.WriteLine();
-                        Console.WriteLine("----- MESSAGE BUS -----");
-                        Console.WriteLine("Allocated Workers: {0}", bus.AllocatedWorkers);
-                        Console.WriteLine("BusyWorkers Workers: {0}", bus.BusyWorkers);
-                    }
-
-                    if (recvPerSec < long.MaxValue && recvPerSec > _peakReceivesPerSecond)
-                    {
-                        Interlocked.Exchange(ref _peakReceivesPerSecond, recvPerSec);
-                    }
-
-                    _avgReceivesPerSecond = _avgLastReceivedCount / (now - _avgCalcStart).TotalSeconds;
-
-                    // File.AppendAllText(resultsPath, String.Format("{0}, {1}, {2}, {3}\n", TotalRate, _receivesPerSecond, _peakReceivesPerSecond, _avgReceivesPerSecond));
-
-                    if (_runs > 0 && _runs % _stepInterval == 0)
-                    {
-                        _avgCalcStart = DateTime.UtcNow;
-                        Interlocked.Exchange(ref _avgLastReceivedCount, 0);
-                        Interlocked.Exchange(ref _avgLastSendsCount, 0);
-                        long old = Interlocked.Read(ref _rate);
-                        long @new = old + _step;
-                        while (Interlocked.Exchange(ref _rate, @new) == old) { }
-                    }
-
-                    _runs++;
-
-                }
-                finally
-                {
-                    _measuringRate = false;
-                }
-            }, null, 1000, 1000);
-        }
-
-        public class StressConnection : PersistentConnection
-        {
-
-        }
-    }
-
-    public class MultGroupHub : Hub
-    {
-        public Task Do(int index)
-        {
-            // Groups.Add(Context.ConnectionId, "one").Wait();
-            Groups.Add(Context.ConnectionId, "one").Wait();
-            return Clients.Group("one").Do(index);
-        }
-    }
-
-    public class User
-    {
-        public int Index { get; set; }
-        public string Name { get; set; }
-        public string Room { get; set; }
-    }
-
-    public class CountDown
-    {
-        private int _count;
-        private ManualResetEventSlim _wh = new ManualResetEventSlim(false);
-
-        public int Count
-        {
-            get
-            {
-                return _count;
-            }
-        }
-
-        public CountDown(int count)
-        {
-            _count = count;
-        }
-
-        public void Dec()
-        {
-            if (Interlocked.Decrement(ref _count) == 0)
-            {
-                _wh.Set();
-            }
-        }
-
-        public bool Wait(TimeSpan timeout)
-        {
-            return _wh.Wait(timeout);
-        }
-
-        internal void Reset()
-        {
-            _wh.Reset();
+            [CommandLineParameter(Command = "SqlTableCount", Required = false, Default = 1, Description = "The number of tables to store messages in the SqlServer DB")]
+            public int SqlTableCount { get; set; }
         }
     }
 }

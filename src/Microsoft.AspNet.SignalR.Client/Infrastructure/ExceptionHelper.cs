@@ -1,7 +1,9 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Net;
+using Microsoft.AspNet.SignalR.Infrastructure;
 
 namespace Microsoft.AspNet.SignalR.Client.Infrastructure
 {
@@ -17,8 +19,26 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
                 return true;
             }
 
+            // There is a race in StreamExtensions where if the endMethod in ReadAsync is called before
+            // the Stream is disposed, but executes after, Stream.EndRead will be called on a disposed object.
+            // Since we call HttpWebRequest.Abort in several places while potentially reading the stream,
+            // and we don't want to lock around HttpWebRequest.Abort and Stream.EndRead, we just swallow the 
+            // exception.
+            // If the Stream is closed before the call to the endMethod, we expect an OperationCanceledException,
+            // so this is a fairly rare race condition.
+            if (exception is ObjectDisposedException)
+            {
+                return true;
+            }
+
+#if NET40 || NET45
             var webException = exception as WebException;
             return (webException != null && webException.Status == WebExceptionStatus.RequestCanceled);
+#elif NETSTANDARD1_3 || NETSTANDARD2_0
+            return false;
+#else
+#error Unsupported framework.
+#endif
         }
     }
 }

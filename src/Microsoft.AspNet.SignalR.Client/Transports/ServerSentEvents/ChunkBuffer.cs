@@ -1,4 +1,5 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Text;
@@ -30,6 +31,11 @@ namespace Microsoft.AspNet.SignalR.Client.Transports.ServerSentEvents
             _buffer.Append(Encoding.UTF8.GetString(buffer, 0, length));
         }
 
+        public void Add(ArraySegment<byte> buffer)
+        {
+            _buffer.Append(Encoding.UTF8.GetString(buffer.Array, buffer.Offset, buffer.Count));
+        }
+
         public string ReadLine()
         {
             // Lock while reading so that we can make safe assuptions about the buffer indicies
@@ -40,11 +46,8 @@ namespace Microsoft.AspNet.SignalR.Client.Transports.ServerSentEvents
                     _buffer.Remove(0, _offset + 1);
 
                     string line = _lineBuilder.ToString().Trim();
-#if WINDOWS_PHONE || NET35
-                    _lineBuilder.Length = 0;
-#else
                     _lineBuilder.Clear();
-#endif
+
                     _offset = 0;
                     return line;
                 }

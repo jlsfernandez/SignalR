@@ -1,4 +1,5 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Threading;
@@ -8,7 +9,7 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
     /// <summary>
     /// Allows for thread safe invocation of a delegate.
     /// </summary>
-    internal struct ThreadSafeInvoker
+    internal class ThreadSafeInvoker
     {
         private int _invoked;
 
@@ -28,17 +29,6 @@ namespace Microsoft.AspNet.SignalR.Client.Infrastructure
             if (Interlocked.Exchange(ref _invoked, 1) == 0)
             {
                 action(arg);
-                return true;
-            }
-
-            return false;
-        }
-
-        public bool Invoke<T1, T2>(Action<T1, T2> action, T1 arg1, T2 arg2)
-        {
-            if (Interlocked.Exchange(ref _invoked, 1) == 0)
-            {
-                action(arg1, arg2);
                 return true;
             }
 

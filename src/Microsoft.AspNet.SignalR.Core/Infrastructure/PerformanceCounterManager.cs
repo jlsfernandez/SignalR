@@ -1,10 +1,19 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
+
+
+#if !UTILS
+using Microsoft.AspNet.SignalR.Tracing;
+#endif
 
 namespace Microsoft.AspNet.SignalR.Infrastructure
 {
@@ -19,11 +28,34 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         public const string CategoryName = "SignalR";
 
         private readonly static PropertyInfo[] _counterProperties = GetCounterPropertyInfo();
-        private object _initDummy;
+        private readonly static IPerformanceCounter _noOpCounter = new NoOpPerformanceCounter();
+        private volatile bool _initialized;
+        private object _initLocker = new object();
+
+#if !UTILS
+        private readonly TraceSource _trace;
+
+        public PerformanceCounterManager(DefaultDependencyResolver resolver)
+            : this(resolver.Resolve<ITraceManager>())
+        {
+
+        }
 
         /// <summary>
         /// Creates a new instance.
         /// </summary>
+        public PerformanceCounterManager(ITraceManager traceManager)
+            : this()
+        {
+            if (traceManager == null)
+            {
+                throw new ArgumentNullException("traceManager");
+            }
+
+            _trace = traceManager["SignalR.PerformanceCounterManager"];
+        }
+#endif
+
         public PerformanceCounterManager()
         {
             InitNoOpCounters();
@@ -46,6 +78,30 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         /// </summary>
         [PerformanceCounter(Name = "Connections Disconnected", Description = "The total number of connection Disconnect events since the application was started.", CounterType = PerformanceCounterType.NumberOfItems32)]
         public IPerformanceCounter ConnectionsDisconnected { get; private set; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of connections currently connected using the ForeverFrame transport.
+        /// </summary>
+        [PerformanceCounter(Name = "Connections Current ForeverFrame", Description = "The number of connections currently connected using the ForeverFrame transport.", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter ConnectionsCurrentForeverFrame { get; private set; }
+        
+        /// <summary>
+        /// Gets the performance counter representing the number of connections currently connected using the LongPolling transport.
+        /// </summary>
+        [PerformanceCounter(Name = "Connections Current LongPolling", Description = "The number of connections currently connected using the LongPolling transport.", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter ConnectionsCurrentLongPolling { get; private set; }
+        
+        /// <summary>
+        /// Gets the performance counter representing the number of connections currently connected using the ServerSentEvents transport.
+        /// </summary>
+        [PerformanceCounter(Name = "Connections Current ServerSentEvents", Description = "The number of connections currently connected using the ServerSentEvents transport.", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter ConnectionsCurrentServerSentEvents { get; private set; }
+        
+        /// <summary>
+        /// Gets the performance counter representing the number of connections currently connected using the WebSockets transport.
+        /// </summary>
+        [PerformanceCounter(Name = "Connections Current WebSockets", Description = "The number of connections currently connected using the WebSockets transport.", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter ConnectionsCurrentWebSockets { get; private set; }
 
         /// <summary>
         /// Gets the performance counter representing the number of connections currently connected.
@@ -78,15 +134,34 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         public IPerformanceCounter ConnectionMessagesSentPerSec { get; private set; }
 
         /// <summary>
+        /// Gets the performance counter representing the total number of messages received by subscribers since the application was started.
+        /// </summary>
+        [PerformanceCounter(Name = "Message Bus Messages Received Total", Description = "The total number of messages received by subscribers since the application was started.", CounterType = PerformanceCounterType.NumberOfItems64)]
+        public IPerformanceCounter MessageBusMessagesReceivedTotal { get; private set; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of messages received by a subscribers per second.
+        /// </summary>
+        [PerformanceCounter(Name = "Message Bus Messages Received/Sec", Description = "The number of messages received by subscribers per second.", CounterType = PerformanceCounterType.RateOfCountsPerSecond32)]
+        public IPerformanceCounter MessageBusMessagesReceivedPerSec { get; private set; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of messages received by the scaleout message bus per second.
+        /// </summary>
+        [PerformanceCounter(Name = "Scaleout Message Bus Messages Received/Sec", Description = "The number of messages received by the scaleout message bus per second.", CounterType = PerformanceCounterType.RateOfCountsPerSecond32)]
+        public IPerformanceCounter ScaleoutMessageBusMessagesReceivedPerSec { get; private set; }
+
+
+        /// <summary>
         /// Gets the performance counter representing the total number of messages published to the message bus since the application was started.
         /// </summary>
-        [PerformanceCounter(Name = "Messages Bus Messages Published Total", Description = "The total number of messages published to the message bus since the application was started.", CounterType = PerformanceCounterType.NumberOfItems64)]
+        [PerformanceCounter(Name = "Message Bus Messages Published Total", Description = "The total number of messages published to the message bus since the application was started.", CounterType = PerformanceCounterType.NumberOfItems64)]
         public IPerformanceCounter MessageBusMessagesPublishedTotal { get; private set; }
 
         /// <summary>
         /// Gets the performance counter representing the number of messages published to the message bus per second.
         /// </summary>
-        [PerformanceCounter(Name = "Messages Bus Messages Published/Sec", Description = "The number of messages published to the message bus per second.", CounterType = PerformanceCounterType.RateOfCountsPerSecond32)]
+        [PerformanceCounter(Name = "Message Bus Messages Published/Sec", Description = "The number of messages published to the message bus per second.", CounterType = PerformanceCounterType.RateOfCountsPerSecond32)]
         public IPerformanceCounter MessageBusMessagesPublishedPerSec { get; private set; }
 
         /// <summary>
@@ -118,6 +193,12 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         /// </summary>
         [PerformanceCounter(Name = "Message Bus Busy Workers", Description = "The number of workers currently busy delivering messages in the message bus.", CounterType = PerformanceCounterType.NumberOfItems32)]
         public IPerformanceCounter MessageBusBusyWorkers { get; private set; }
+
+        /// <summary>
+        /// Gets the performance counter representing representing the current number of topics in the message bus.
+        /// </summary>
+        [PerformanceCounter(Name = "Message Bus Topics Current", Description = "The number of topics in the message bus.", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter MessageBusTopicsCurrent { get; private set; }
 
         /// <summary>
         /// Gets the performance counter representing the total number of all errors processed since the application was started.
@@ -167,6 +248,45 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         [PerformanceCounter(Name = "Errors: Transport/Sec", Description = "The number of transport errors per second.", CounterType = PerformanceCounterType.RateOfCountsPerSecond32)]
         public IPerformanceCounter ErrorsTransportPerSec { get; private set; }
 
+
+        /// <summary>
+        /// Gets the performance counter representing the number of logical streams in the currently configured scaleout message bus provider.
+        /// </summary>
+        [PerformanceCounter(Name = "Scaleout Streams Total", Description = "The number of logical streams in the currently configured scaleout message bus provider.", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter ScaleoutStreamCountTotal { get; private set; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of logical streams in the currently configured scaleout message bus provider that are in the open state.
+        /// </summary>
+        [PerformanceCounter(Name = "Scaleout Streams Open", Description = "The number of logical streams in the currently configured scaleout message bus provider that are in the open state", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter ScaleoutStreamCountOpen { get; private set; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of logical streams in the currently configured scaleout message bus provider that are in the buffering state.
+        /// </summary>
+        [PerformanceCounter(Name = "Scaleout Streams Buffering", Description = "The number of logical streams in the currently configured scaleout message bus provider that are in the buffering state", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter ScaleoutStreamCountBuffering { get; private set; }
+
+        /// <summary>
+        /// Gets the performance counter representing the total number of scaleout errors since the application was started.
+        /// </summary>
+        [PerformanceCounter(Name = "Scaleout Errors Total", Description = "The total number of scaleout errors since the application was started.", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter ScaleoutErrorsTotal { get; private set; }
+
+        /// <summary>
+        /// Gets the performance counter representing the number of scaleout errors per second.
+        /// </summary>
+        [PerformanceCounter(Name = "Scaleout Errors/Sec", Description = "The number of scaleout errors per second.", CounterType = PerformanceCounterType.RateOfCountsPerSecond32)]
+        public IPerformanceCounter ScaleoutErrorsPerSec { get; private set; }
+
+        /// <summary>
+        /// Gets the performance counter representing the current scaleout send queue length.
+        /// </summary>
+        [PerformanceCounter(Name = "Scaleout Send Queue Length", Description = "The current scaleout send queue length.", CounterType = PerformanceCounterType.NumberOfItems32)]
+        public IPerformanceCounter ScaleoutSendQueueLength { get; private set; }
+
+        internal string InstanceName { get; private set; }
+
         /// <summary>
         /// Initializes the performance counters.
         /// </summary>
@@ -174,18 +294,54 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
         /// <param name="hostShutdownToken">The CancellationToken representing the host shutdown.</param>
         public void Initialize(string instanceName, CancellationToken hostShutdownToken)
         {
-            LazyInitializer.EnsureInitialized(ref _initDummy, () =>
+            if (_initialized)
+            {
+                return;
+            }
+
+            var needToRegisterWithShutdownToken = false;
+            lock (_initLocker)
+            {
+                if (!_initialized)
                 {
-                    instanceName = instanceName ?? Guid.NewGuid().ToString();
-                    if (hostShutdownToken != null)
+                    InstanceName = SanitizeInstanceName(instanceName);
+                    SetCounterProperties();
+                    // The initializer ran, so let's register the shutdown cleanup
+                    if (hostShutdownToken != CancellationToken.None)
                     {
-                        hostShutdownToken.Register(UnloadCounters);
+                        needToRegisterWithShutdownToken = true;
                     }
+                    _initialized = true;
+                }
+            }
 
-                    SetCounterProperties(instanceName);
+            if (needToRegisterWithShutdownToken)
+            {
+                hostShutdownToken.Register(UnloadCounters);
+            }
+        }
 
-                    return new object();
-                });
+        private void UnloadCounters()
+        {
+            lock (_initLocker)
+            {
+                if (!_initialized)
+                {
+                    // We were never initalized
+                    return;
+                }
+            }
+
+            var counterProperties = this.GetType()
+                .GetProperties()
+                .Where(p => p.PropertyType == typeof(IPerformanceCounter));
+
+            foreach (var property in counterProperties)
+            {
+                var counter = property.GetValue(this, null) as IPerformanceCounter;
+                counter.Close();
+                counter.RemoveInstance();
+            }
         }
 
         private void InitNoOpCounters()
@@ -198,39 +354,35 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
             }
         }
 
-        private void SetCounterProperties(string instanceName)
+        private void SetCounterProperties()
         {
+            var loadCounters = true;
+
             foreach (var property in _counterProperties)
             {
-                var attribute = GetPerformanceCounterAttribute(property);
-                
+                PerformanceCounterAttribute attribute = GetPerformanceCounterAttribute(property);
+
                 if (attribute == null)
                 {
                     continue;
                 }
 
-                var counter = LoadCounter(CategoryName, attribute.Name, instanceName);
-                counter.NextSample(); // Initialize the counter sample
+                IPerformanceCounter counter = null;
+
+                if (loadCounters)
+                {
+                    counter = LoadCounter(CategoryName, attribute.Name, isReadOnly:false);
+
+                    if (counter == null)
+                    {
+                        // We failed to load the counter so skip the rest
+                        loadCounters = false;
+                    }
+                }
+
+                counter = counter ?? _noOpCounter;
+
                 property.SetValue(this, counter, null);
-            }
-        }
-
-        private void UnloadCounters()
-        {
-            if (_initDummy == null)
-            {
-                return;
-            }
-
-            var counterProperties = this.GetType()
-                .GetProperties()
-                .Where(p => p.PropertyType == typeof(IPerformanceCounter));
-
-            foreach (var property in counterProperties)
-            {
-                var counter = property.GetValue(this, null) as IPerformanceCounter;
-                counter.Close();
-                counter.RemoveInstance();
             }
         }
 
@@ -249,18 +401,78 @@ namespace Microsoft.AspNet.SignalR.Infrastructure
                     .SingleOrDefault();
         }
 
-        private static IPerformanceCounter LoadCounter(string categoryName, string counterName, string instanceName)
+        private static string SanitizeInstanceName(string instanceName)
         {
+            // Details on how to sanitize instance names are at http://msdn.microsoft.com/en-us/library/vstudio/system.diagnostics.performancecounter.instancename
+            if (string.IsNullOrWhiteSpace(instanceName))
+            {
+                instanceName = Guid.NewGuid().ToString();
+            }
+            
+            // Substitute invalid chars with valid replacements
+            var substMap = new Dictionary<char, char> {
+                { '(', '[' },
+                { ')', ']' },
+                { '#', '-' },
+                { '\\', '-' },
+                { '/', '-' }
+            };
+            var sanitizedName = new String(instanceName.Select(c => substMap.ContainsKey(c) ? substMap[c] : c).ToArray());
+
+            // Names must be shorter than 128 chars, see doc link above
+            var maxLength = 127;
+            return sanitizedName.Length <= maxLength
+                ? sanitizedName
+                : sanitizedName.Substring(0, maxLength);
+        }
+
+        private IPerformanceCounter LoadCounter(string categoryName, string counterName, bool isReadOnly)
+        {
+            return LoadCounter(categoryName, counterName, InstanceName, isReadOnly);
+        }
+
+        [SuppressMessage("Microsoft.Performance", "CA1822:MarkMembersAsStatic", Justification = "This file is shared")]
+        [SuppressMessage("Microsoft.Reliability", "CA2000:Dispose objects before losing scope", Justification = "Counters are disposed later")]
+        public IPerformanceCounter LoadCounter(string categoryName, string counterName, string instanceName, bool isReadOnly)
+        {
+            // See http://msdn.microsoft.com/en-us/library/356cx381.aspx for the list of exceptions
+            // and when they are thrown. 
             try
             {
-                if (PerformanceCounterCategory.Exists(categoryName) && PerformanceCounterCategory.CounterExists(counterName, categoryName))
-                {
-                    return new PerformanceCounterWrapper(new PerformanceCounter(categoryName, counterName, instanceName, readOnly: false));
-                }
-                return new NoOpPerformanceCounter();
+                var counter = new PerformanceCounter(categoryName, counterName, instanceName, isReadOnly);
+
+                // Initialize the counter sample
+                counter.NextSample();
+
+                return new PerformanceCounterWrapper(counter);
             }
-            catch (InvalidOperationException) { return new NoOpPerformanceCounter(); }
-            catch (UnauthorizedAccessException) { return new NoOpPerformanceCounter(); }
+#if UTILS
+            catch (InvalidOperationException) { return null; }
+            catch (UnauthorizedAccessException) { return null; }
+            catch (Win32Exception) { return null; }
+            catch (PlatformNotSupportedException) { return null; }
+#else
+            catch (InvalidOperationException ex)
+            {
+                _trace.TraceEvent(TraceEventType.Error, 0, "Performance counter failed to load: " + ex.GetBaseException());
+                return null;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                _trace.TraceEvent(TraceEventType.Error, 0, "Performance counter failed to load: " + ex.GetBaseException());
+                return null;
+            }
+            catch (Win32Exception ex)
+            {
+                _trace.TraceEvent(TraceEventType.Error, 0, "Performance counter failed to load: " + ex.GetBaseException());
+                return null;
+            }
+            catch (PlatformNotSupportedException ex)
+            {
+                _trace.TraceEvent(TraceEventType.Error, 0, "Performance counter failed to load: " + ex.GetBaseException());
+                return null;
+            }
+#endif
         }
     }
 }

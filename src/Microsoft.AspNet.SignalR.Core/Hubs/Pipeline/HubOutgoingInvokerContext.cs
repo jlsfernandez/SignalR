@@ -1,18 +1,25 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System.Collections.Generic;
 using System.Linq;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
-    public class HubOutgoingInvokerContext : IHubOutgoingInvokerContext
+    internal class HubOutgoingInvokerContext : IHubOutgoingInvokerContext
     {        
-        public HubOutgoingInvokerContext(IConnection connection, string signal, ClientHubInvocation invocation, IEnumerable<string> excludedSignals)
+        public HubOutgoingInvokerContext(IConnection connection, string signal, ClientHubInvocation invocation)
         {
             Connection = connection;
             Signal = signal;
             Invocation = invocation;
-            ExcludedSignals = excludedSignals;
+        }
+
+        public HubOutgoingInvokerContext(IConnection connection, IList<string> signals, ClientHubInvocation invocation)
+        {
+            Connection = connection;
+            Signals = signals;
+            Invocation = invocation;
         }
 
         public IConnection Connection
@@ -33,10 +40,16 @@ namespace Microsoft.AspNet.SignalR.Hubs
             private set;
         }
 
-        public IEnumerable<string> ExcludedSignals
+        public IList<string> Signals
         {
             get;
             private set;
+        }
+
+        public IList<string> ExcludedSignals
+        {
+            get;
+            set;
         }
     }
 }

@@ -1,9 +1,10 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Newtonsoft.Json.Linq;
+using Microsoft.AspNet.SignalR.Json;
 
 namespace Microsoft.AspNet.SignalR.Hubs
 {
@@ -23,29 +24,37 @@ namespace Microsoft.AspNet.SignalR.Hubs
         public HubDescriptor GetHub(string hubName)
         {
             HubDescriptor descriptor = null;
-            if(_hubProviders.FirstOrDefault(p => p.TryGetHub(hubName, out descriptor)) != null)
+            if (_hubProviders.FirstOrDefault(p => p.TryGetHub(hubName, out descriptor)) != null)
             {
+                ValidateHubDescriptor(descriptor);
                 return descriptor;
             }
 
             return null;
         }
 
-        public IEnumerable<HubDescriptor> GetHubs(Func<HubDescriptor, bool> predicate = null)
+        public IEnumerable<HubDescriptor> GetHubs(Func<HubDescriptor, bool> predicate)
         {
             var hubs = _hubProviders.SelectMany(p => p.GetHubs());
 
-            if(predicate != null) 
+            if (predicate != null)
             {
-                return hubs.Where(predicate);
+                hubs = hubs.Where(predicate);
             }
 
-            return hubs;
+            var hubsList = hubs.ToList();
+
+            foreach (var hub in hubsList)
+            {
+                ValidateHubDescriptor(hub);
+            }
+
+            return hubsList;
         }
 
-        public MethodDescriptor GetHubMethod(string hubName, string method, params IJsonValue[] parameters)
+        public MethodDescriptor GetHubMethod(string hubName, string method, IList<IJsonValue> parameters)
         {
-            HubDescriptor hub = GetHub(hubName);
+            var hub = GetHub(hubName);
 
             if (hub == null)
             {
@@ -61,9 +70,9 @@ namespace Microsoft.AspNet.SignalR.Hubs
             return null;
         }
 
-        public IEnumerable<MethodDescriptor> GetHubMethods(string hubName, Func<MethodDescriptor, bool> predicate = null)
+        public IEnumerable<MethodDescriptor> GetHubMethods(string hubName, Func<MethodDescriptor, bool> predicate)
         {
-            HubDescriptor hub = GetHub(hubName);
+            var hub = GetHub(hubName);
 
             if (hub == null)
             {
@@ -72,24 +81,32 @@ namespace Microsoft.AspNet.SignalR.Hubs
 
             var methods = _methodProviders.SelectMany(p => p.GetMethods(hub));
 
-            if(predicate != null) 
+            if (predicate != null)
             {
                 return methods.Where(predicate);
             }
 
             return methods;
-                    
+
         }
 
         public IHub ResolveHub(string hubName)
         {
-            HubDescriptor hub = GetHub(hubName);
+            var hub = GetHub(hubName);
             return hub == null ? null : _activator.Create(hub);
         }
 
         public IEnumerable<IHub> ResolveHubs()
         {
-            return GetHubs().Select(hub => _activator.Create(hub));
+            return GetHubs(predicate: null).Select(hub => _activator.Create(hub));
+        }
+
+        private void ValidateHubDescriptor(HubDescriptor hub)
+        {
+            if (hub.Name.Contains("."))
+            {
+                throw new InvalidOperationException(string.Format(Resources.Error_HubNameIsInvalid, hub.Name));
+            }
         }
     }
 }

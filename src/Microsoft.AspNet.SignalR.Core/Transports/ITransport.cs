@@ -1,8 +1,12 @@
-﻿// Copyright (c) Microsoft Open Technologies, Inc. All rights reserved. See License.md in the project root for license information.
+﻿// Copyright (c) .NET Foundation. All rights reserved.
+// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.AspNet.SignalR.Infrastructure;
+using Microsoft.AspNet.SignalR.Hosting;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Microsoft.AspNet.SignalR.Transports
 {
@@ -22,11 +26,6 @@ namespace Microsoft.AspNet.SignalR.Transports
         Func<Task> Connected { get; set; }
 
         /// <summary>
-        /// Gets or sets a callback that is invoked when the transport connects.
-        /// </summary>
-        Func<Task> TransportConnected { get; set; }
-
-        /// <summary>
         /// Gets or sets a callback that is invoked when the transport reconnects.
         /// </summary>
         Func<Task> Reconnected { get; set; }
@@ -34,17 +33,19 @@ namespace Microsoft.AspNet.SignalR.Transports
         /// <summary>
         /// Gets or sets a callback that is invoked when the transport disconnects.
         /// </summary>
-        Func<Task> Disconnected { get; set; }
+        Func<bool, Task> Disconnected { get; set; }
 
         /// <summary>
-        /// Gets the connection id for the transport.
+        /// Gets or sets the connection id for the transport.
         /// </summary>
-        string ConnectionId { get; }
+        string ConnectionId { get; set; }
 
         /// <summary>
-        /// Gets the groups the connection is a member of.
+        /// Get groupsToken in request over the transport.
         /// </summary>
-        IEnumerable<string> Groups { get; }
+        /// <returns>groupsToken in request</returns>
+        [SuppressMessage("Microsoft.Design", "CA1024:UsePropertiesWhereAppropriate", Justification = "This is for async.")]
+        Task<string> GetGroupsToken();
 
         /// <summary>
         /// Processes the specified <see cref="ITransportConnection"/> for this transport.
